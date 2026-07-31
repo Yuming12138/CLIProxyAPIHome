@@ -50,7 +50,14 @@ var defaultAntigravityURLs = []string{
 	"https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
 }
 
+// SnapshotObservation carries the scheduler-relevant quota snapshot outcome.
+type SnapshotObservation struct {
+	QuotaStatus string
+	RetryAfter  *time.Duration
+}
+
 type Options struct {
+	OnSnapshot             func(context.Context, *coreauth.Auth, SnapshotObservation)
 	Owner                  string
 	HomeID                 string
 	GlobalProxyURL         string
@@ -358,6 +365,9 @@ func (c *Collector) collectCredential(ctx context.Context, auth *coreauth.Auth, 
 		return
 	}
 	if updated {
+		if c.options.OnSnapshot != nil {
+			c.options.OnSnapshot(ctx, auth, quotaSnapshotObservation(input, observedAt))
+		}
 		log.WithFields(log.Fields{
 			"credential_id": auth.ID,
 			"provider":      normalizedQuotaProvider(auth.Provider),
@@ -557,6 +567,75 @@ func (c *Collector) failProbe(ctx context.Context, credentialID string, failure 
 		"status_code":   failure.statusCode,
 		"next_probe_at": nextProbeAt,
 	}).Debug("quota collector: failure persisted")
+}
+
+func quotaSnapshotObservation(snapshot cluster.QuotaSnapshotWrite, now time.Time) SnapshotObservation {
+	status := strings.ToLower(strings.TrimSpace(snapshot.QuotaStatus))
+	observation := SnapshotObservation{QuotaStatus: status}
+	if status != "exhausted" {
+		return observation
+	}
+	retryAfter := quotaSnapshotRetryAfter(snapshot, now)
+	if retryAfter > 0 {
+		observation.RetryAfter = &retryAfter
+	}
+	return observation
+}
+
+func quotaSnapshotRetryAfter(snapshot cluster.QuotaSnapshotWrite, now time.Time) time.Duration {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	now = now.UTC()
+	if retryAt := quotaSnapshotAccountResetAt(snapshot, now); !retryAt.IsZero() {
+		return retryAt.Sub(now)
+	}
+	if retryAt := quotaSnapshotFallbackRetryAt(snapshot, now); !retryAt.IsZero() {
+		return retryAt.Sub(now)
+	}
+	return defaultSnapshotFreshness
+}
+
+func quotaSnapshotAccountResetAt(snapshot cluster.QuotaSnapshotWrite, now time.Time) time.Time {
+	var retryAt time.Time
+	for _, window := range snapshot.Windows {
+		if !strings.EqualFold(strings.TrimSpace(window.Status), "exhausted") {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(window.Scope), "account") && strings.TrimSpace(window.Scope) != "" {
+			continue
+		}
+		if window.ResetAt == nil || window.ResetAt.IsZero() {
+			continue
+		}
+		value := window.ResetAt.UTC()
+		if !value.After(now) {
+			continue
+		}
+		if retryAt.IsZero() || value.Before(retryAt) {
+			retryAt = value
+		}
+	}
+	return retryAt
+}
+
+func quotaSnapshotFallbackRetryAt(snapshot cluster.QuotaSnapshotWrite, now time.Time) time.Time {
+	var retryAt time.Time
+	remember := func(candidate *time.Time) {
+		if candidate == nil || candidate.IsZero() {
+			return
+		}
+		value := candidate.UTC()
+		if !value.After(now) {
+			return
+		}
+		if retryAt.IsZero() || value.Before(retryAt) {
+			retryAt = value
+		}
+	}
+	remember(snapshot.ExpiresAt)
+	remember(snapshot.NextProbeAt)
+	return retryAt
 }
 
 func quotaBackoffWithJitter(delay time.Duration, credentialID string) time.Duration {

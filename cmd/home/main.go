@@ -417,6 +417,9 @@ func run() int {
 			}
 			return currentConfig.ProxyURL
 		},
+		OnSnapshot: func(ctx context.Context, auth *coreauth.Auth, observation quotacollector.SnapshotObservation) {
+			rt.RecordQuotaObservation(ctx, auth, observation.QuotaStatus, observation.RetryAfter)
+		},
 		ResolveAuth: func(ctx context.Context, candidate *coreauth.Auth) (*coreauth.Auth, error) {
 			if candidate == nil {
 				return nil, fmt.Errorf("quota collector credential is nil")
