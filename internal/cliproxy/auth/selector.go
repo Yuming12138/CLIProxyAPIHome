@@ -320,6 +320,8 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 			// A stale aggregate retry deadline must not hide an otherwise active auth.
 		} else if isTransientRefreshState(auth) && !refreshBackoffBlocksDispatch(auth, model, now) {
 			// A refresh retry window should not hide an otherwise usable token.
+		} else if transientExecutionAggregateAllowsModel(auth, model, now) {
+			// Home-mode model state is authoritative when transient cooling is disabled.
 		} else {
 			next := auth.NextRetryAfter
 			if auth.Quota.NextRecoverAt.After(next) {
@@ -381,6 +383,52 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
+}
+
+// transientExecutionAggregateAllowsModel reports whether a stale auth-level
+// transient failure can be ignored for a model whose own cooldown is inactive.
+// Home mode deliberately disables downstream transient cooling while keeping
+// centralized quota cooling, so an older auth-level deadline must not create a
+// pool-wide blackout after an HTTP/2 or other retryable upstream failure.
+func transientExecutionAggregateAllowsModel(auth *Auth, model string, now time.Time) bool {
+	if auth == nil || auth.LastError == nil || auth.Quota.Exceeded || model == "" {
+		return false
+	}
+	if !isTransientExecutionError(auth.LastError) {
+		return false
+	}
+	state := auth.ModelStates[model]
+	if state == nil {
+		baseModel := canonicalModelKey(model)
+		if baseModel != "" && baseModel != model {
+			state = auth.ModelStates[baseModel]
+		}
+	}
+	if state == nil || state.Status == StatusDisabled || state.Quota.Exceeded {
+		return false
+	}
+	return state.NextRetryAfter.IsZero() || !state.NextRetryAfter.After(now)
+}
+
+// isTransientExecutionError reports whether an execution failure is safe to retry on a fresh route.
+func isTransientExecutionError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	switch err.StatusCode() {
+	case http.StatusRequestTimeout,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	}
+	message := strings.ToLower(err.Message)
+	return strings.Contains(message, "protocol_error") ||
+		strings.Contains(message, "internal_error") ||
+		strings.Contains(message, "unexpected eof") ||
+		strings.Contains(message, "i/o timeout") ||
+		strings.Contains(message, "connection reset by peer")
 }
 
 func refreshBackoffBlocksDispatch(auth *Auth, model string, now time.Time) bool {

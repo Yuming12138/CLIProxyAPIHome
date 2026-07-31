@@ -187,6 +187,43 @@ func TestCentralQuotaCoolingDoesNotBlackoutDispatchAfterTransientError(t *testin
 	}
 }
 
+func TestTransientExecutionAggregateRetryDoesNotBlackoutModelWithoutCooldown(t *testing.T) {
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:             "auth-transient-aggregate",
+		Provider:       "codex",
+		Status:         StatusError,
+		StatusMessage:  "transient upstream error",
+		Unavailable:    true,
+		NextRetryAfter: now.Add(time.Minute),
+		LastError: &Error{
+			Message:    "stream error: INTERNAL_ERROR received from peer",
+			HTTPStatus: http.StatusInternalServerError,
+		},
+		ModelStates: map[string]*ModelState{
+			"gpt-5.6-sol": {
+				Status:      StatusError,
+				Unavailable: true,
+				LastError: &Error{
+					Message:    "stream error: INTERNAL_ERROR received from peer",
+					HTTPStatus: http.StatusInternalServerError,
+				},
+			},
+		},
+	}
+	setAuthCooldownScope(auth, cooldownScopeAuth)
+
+	if blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5.6-sol", now); blocked {
+		t.Fatalf("isAuthBlockedForModel() = true, %v, %v; want model dispatchable", reason, next)
+	}
+
+	modelRetry := now.Add(30 * time.Second)
+	auth.ModelStates["gpt-5.6-sol"].NextRetryAfter = modelRetry
+	if blocked, _, _ := isAuthBlockedForModel(auth, "gpt-5.6-sol", now); !blocked {
+		t.Fatal("model with an active transient retry deadline was not blocked")
+	}
+}
+
 func TestAuthRefreshBackoffBlocksEveryModel(t *testing.T) {
 	now := time.Now().UTC()
 	auth := &Auth{
