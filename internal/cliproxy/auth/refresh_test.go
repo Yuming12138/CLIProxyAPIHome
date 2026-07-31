@@ -600,6 +600,27 @@ func TestDispatchKeepsValidTokenAvailableDuringRefreshRetryBackoff(t *testing.T)
 	}
 }
 
+func TestDispatchAllowsOrphanedUnavailableCandidate(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:             "orphaned-unavailable",
+		Provider:       "codex",
+		Status:         StatusActive,
+		Unavailable:    true,
+		NextRetryAfter: now.Add(time.Minute),
+		ModelStates: map[string]*ModelState{
+			"gpt-5.6-sol": {Status: StatusActive},
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5.6-sol", now)
+	if blocked || reason != blockReasonNone {
+		t.Fatalf("orphaned unavailable candidate blocked=%v reason=%v next=%v, want dispatchable", blocked, reason, next)
+	}
+}
+
 func TestDispatchAllowsLightweightRefreshRetryBackoffCandidate(t *testing.T) {
 	t.Parallel()
 

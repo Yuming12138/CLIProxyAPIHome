@@ -316,7 +316,9 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, auth.NextRetryAfter
 	}
 	if auth.Unavailable && auth.NextRetryAfter.After(now) && !authUnavailableAggregatedFromModels(auth, now) {
-		if isTransientRefreshState(auth) && !refreshBackoffBlocksDispatch(auth, model, now) {
+		if isOrphanedUnavailableState(auth, now) {
+			// A stale aggregate retry deadline must not hide an otherwise active auth.
+		} else if isTransientRefreshState(auth) && !refreshBackoffBlocksDispatch(auth, model, now) {
 			// A refresh retry window should not hide an otherwise usable token.
 		} else {
 			next := auth.NextRetryAfter
