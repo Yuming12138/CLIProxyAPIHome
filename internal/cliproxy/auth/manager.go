@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -706,50 +707,122 @@ func (m *Manager) Dispatch(ctx context.Context, providers []string, requestedMod
 		pluginScheduler := m.pluginScheduler
 		dispatchCandidates := make([]dispatchCandidate, 0, len(m.auths))
 		availableAuths := make([]*Auth, 0, len(m.auths))
+		allCandidateCount := len(m.auths)
+		invalidCandidateCount := 0
+		disabledCandidateCount := 0
+		triedCandidateCount := 0
+		authScopeFilteredCount := 0
+		providerFilteredCount := 0
+		registryModelFilteredCount := 0
+		blockedDisabledCount := 0
+		blockedOtherCount := 0
+		concurrencyFilteredCount := 0
+		candidateStateCount := 0
+		candidateStates := make([]string, 0, min(len(m.auths), maxDispatchDiagnosticCandidates))
+		appendCandidateState := func(candidate *Auth, classification string) {
+			candidateStateCount++
+			if len(candidateStates) >= maxDispatchDiagnosticCandidates {
+				return
+			}
+			candidateStates = append(candidateStates, m.dispatchAuthStateDetail(candidate, routeModel, classification, now))
+		}
 		totalCandidates := 0
 		cooldownCount := 0
 		var earliest time.Time
 		for _, candidate := range m.auths {
-			if candidate == nil || candidate.Disabled {
+			if candidate == nil {
+				invalidCandidateCount++
+				appendCandidateState(candidate, "invalid")
+				continue
+			}
+			if candidate.Disabled {
+				disabledCandidateCount++
+				appendCandidateState(candidate, "disabled")
 				continue
 			}
 			if _, used := tried[candidate.ID]; used {
+				triedCandidateCount++
+				appendCandidateState(candidate, "tried")
 				continue
 			}
 			if !authAllowedByID(candidate.ID, allowedAuthIDs) {
+				authScopeFilteredCount++
+				appendCandidateState(candidate, "auth_scope")
 				continue
 			}
 			providerKey := strings.ToLower(strings.TrimSpace(candidate.Provider))
 			if providerKey == "" {
+				providerFilteredCount++
+				appendCandidateState(candidate, "provider_empty")
 				continue
 			}
 			if !containsProvider(normalizedProviders, providerKey) {
+				providerFilteredCount++
+				appendCandidateState(candidate, "provider_scope")
 				continue
 			}
 			if routeKey != "" && (registryRef == nil || !registryRef.ClientSupportsModel(candidate.ID, routeKey)) {
+				registryModelFilteredCount++
+				appendCandidateState(candidate, "registry_model")
 				continue
 			}
 			totalCandidates++
 			dispatchCandidate, okCandidate, reason, next := m.buildDispatchCandidate(candidate, providerKey, routeModel, now)
 			if !okCandidate {
-				if reason == blockReasonCooldown {
+				switch reason {
+				case blockReasonCooldown:
 					cooldownCount++
 					if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
 						earliest = next
 					}
+					appendCandidateState(candidate, "cooldown")
+				case blockReasonDisabled:
+					blockedDisabledCount++
+					appendCandidateState(candidate, "blocked_disabled")
+				default:
+					blockedOtherCount++
+					appendCandidateState(candidate, "blocked_other")
 				}
 				continue
 			}
 			if concurrencyCandidateExcluded(opts, candidate.ID, dispatchCandidate.upstreamKey) {
+				concurrencyFilteredCount++
+				appendCandidateState(candidate, "concurrency")
 				continue
 			}
 			dispatchCandidates = append(dispatchCandidates, dispatchCandidate)
 			availableAuths = append(availableAuths, candidate)
+			appendCandidateState(candidate, "ready")
 		}
 		m.mu.RUnlock()
 
 		if len(availableAuths) == 0 {
-			return nil, dispatchUnavailableError(routeModel, providerForSelector, totalCandidates, cooldownCount, earliest, now)
+			errUnavailable := dispatchUnavailableError(routeModel, providerForSelector, totalCandidates, cooldownCount, earliest, now)
+			var authErr *Error
+			if errors.As(errUnavailable, &authErr) && authErr.Code == "auth_unavailable" {
+				sort.Strings(candidateStates)
+				log.WithFields(log.Fields{
+					"providers":                       strings.Join(normalizedProviders, ","),
+					"model":                           routeModel,
+					"all_candidate_count":             allCandidateCount,
+					"candidate_count":                 totalCandidates,
+					"cooldown_count":                  cooldownCount,
+					"invalid_count":                   invalidCandidateCount,
+					"disabled_count":                  disabledCandidateCount,
+					"tried_count":                     triedCandidateCount,
+					"auth_scope_filtered_count":       authScopeFilteredCount,
+					"provider_filtered_count":         providerFilteredCount,
+					"registry_model_filtered_count":   registryModelFilteredCount,
+					"blocked_disabled_count":          blockedDisabledCount,
+					"blocked_other_count":             blockedOtherCount,
+					"concurrency_filtered_count":      concurrencyFilteredCount,
+					"allowed_auth_scope":              allowedAuthIDs != nil,
+					"excluded_concurrency_rule_count": len(excludedConcurrencyCandidatesFromOptions(opts)),
+					"candidate_states":                strings.Join(candidateStates, ";"),
+					"candidate_states_truncated":      candidateStateCount > len(candidateStates),
+				}).Warn("auth dispatch fallback has no ready credential")
+			}
+			return nil, errUnavailable
 		}
 
 		var auth *Auth
@@ -830,6 +903,56 @@ func (m *Manager) Dispatch(ctx context.Context, providers []string, requestedMod
 			OriginalAlias: fullCandidate.originalAlias,
 		}, nil
 	}
+}
+
+const maxDispatchDiagnosticCandidates = 24
+
+func (m *Manager) dispatchAuthStateDetail(auth *Auth, routeModel string, classification string, now time.Time) string {
+	if auth == nil {
+		return "auth=none,filter=" + classification + ",state=invalid"
+	}
+
+	authRef := strings.TrimSpace(auth.ID)
+	if len(authRef) > 8 {
+		authRef = authRef[:8]
+	}
+	if authRef == "" {
+		authRef = "none"
+	}
+
+	modelKey := canonicalModelKey(routeModel)
+	if m != nil {
+		if resolved := m.resolveDispatchModel(auth, routeModel); resolved.Key != "" {
+			modelKey = resolved.Key
+		}
+	}
+	modelStatus := StatusUnknown
+	modelUnavailable := false
+	modelQuotaExceeded := false
+	modelRetryMS := int64(0)
+	if state := auth.ModelStates[modelKey]; state != nil {
+		modelStatus = state.Status
+		modelUnavailable = state.Unavailable
+		modelQuotaExceeded = state.Quota.Exceeded
+		modelRetryMS = retryAfterMilliseconds(now, state.NextRetryAfter)
+	}
+
+	return fmt.Sprintf(
+		"auth=%s,filter=%s,provider=%s,status=%s,disabled=%t,unavailable=%t,refresh_backoff=%t,quota=%t,retry_ms=%d,model_status=%s,model_unavailable=%t,model_quota=%t,model_retry_ms=%d",
+		authRef,
+		classification,
+		strings.ToLower(strings.TrimSpace(auth.Provider)),
+		auth.Status,
+		auth.Disabled,
+		auth.Unavailable,
+		RefreshBackoffOpen(auth, now),
+		auth.Quota.Exceeded,
+		retryAfterMilliseconds(now, auth.NextRetryAfter),
+		modelStatus,
+		modelUnavailable,
+		modelQuotaExceeded,
+		modelRetryMS,
+	)
 }
 
 // resolveFullDispatchAuth resolves a full dispatch auth.
