@@ -229,6 +229,7 @@ func NewRuntime(cfg *config.Config) (*Runtime, error) {
 
 	selector := selectorFromConfig(cfg)
 	coreManager := coreauth.NewManager(store, selector, nil)
+	coreManager.SetCentralQuotaCooling(true)
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(cfg)
 	coreManager.SetOAuthModelAlias(cfg.OAuthModelAlias)

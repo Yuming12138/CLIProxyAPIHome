@@ -477,6 +477,9 @@ func (m *Manager) quotaCooldownDisabledForAuth(auth *Auth) bool {
 			}
 		}
 	}
+	if m != nil && m.centralCooling.Load() {
+		return false
+	}
 	cfg, _ := m.runtimeConfig.Load().(*config.Config)
 	return cfg != nil && cfg.DisableCooling
 }

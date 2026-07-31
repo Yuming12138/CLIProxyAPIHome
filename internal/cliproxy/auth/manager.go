@@ -65,6 +65,7 @@ type Manager struct {
 
 	oauthModelAlias atomic.Value
 	runtimeConfig   atomic.Value
+	centralCooling  atomic.Bool
 
 	rtProvider         RoundTripperProvider
 	fullResolver       FullAuthResolver
@@ -166,6 +167,15 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	if m.scheduler != nil {
 		m.scheduler.resetModelShards()
 	}
+}
+
+// SetCentralQuotaCooling makes this manager authoritative for quota cooldowns
+// even when the runtime configuration disables cooling on downstream clients.
+func (m *Manager) SetCentralQuotaCooling(enabled bool) {
+	if m == nil {
+		return
+	}
+	m.centralCooling.Store(enabled)
 }
 
 // SetSelector sets a selector.

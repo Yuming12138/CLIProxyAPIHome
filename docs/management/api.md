@@ -3967,7 +3967,7 @@ These fields are accepted by Home YAML config. `PUT /config.yaml` accepts non-cr
 | `plugins.configs` | object | Per-plugin config keyed by plugin ID. Store installs write a pinned `store` manifest under each plugin entry. Home-mode CPA nodes download store entries from that manifest; Home downloads and loads them only when `load-in-home: true` is explicitly set. |
 | `usage-statistics-enabled` | boolean | Enables in-memory usage aggregation. Home forces this to `true` for downstream CPA nodes and rejects disabling it through Management API updates. |
 | `redis-usage-queue-retention-seconds` | integer | Usage queue retention window. Default `60`, max `3600`. |
-| `disable-cooling` | boolean | Globally disables quota cooldown scheduling. Home forces this to `true` for downstream CPA nodes. |
+| `disable-cooling` | boolean | Globally disables downstream quota cooldown scheduling. Home forces this to `true` for CPA nodes, while Home's authoritative central scheduler still applies quota cooldowns; a credential-level `disable-cooling=true` override can still opt that credential out. |
 | `auth-auto-refresh-workers` | integer | Overrides auth auto-refresh worker count. |
 | `request-retry` | integer | Failed request retry count. |
 | `max-retry-credentials` | integer | Max credentials to try per failed request; `<=0` means all available. |

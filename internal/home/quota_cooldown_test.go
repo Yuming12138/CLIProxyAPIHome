@@ -7,6 +7,7 @@ import (
 	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPIHome/internal/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPIHome/internal/config"
 )
 
 func TestRecordQuotaObservationAppliesAccountExhaustedCooldown(t *testing.T) {
@@ -73,5 +74,54 @@ func TestRecordQuotaObservationIgnoresUnknownSnapshot(t *testing.T) {
 	}
 	if updated.Unavailable || updated.Quota.Exceeded || !updated.NextRetryAfter.IsZero() {
 		t.Fatalf("unknown snapshot changed auth state: %+v", updated)
+	}
+}
+
+func TestNewRuntimeKeepsCentralQuotaCoolingEnabled(t *testing.T) {
+	rt, errRuntime := NewRuntime(&config.Config{DisableCooling: true})
+	if errRuntime != nil {
+		t.Fatalf("NewRuntime() error = %v", errRuntime)
+	}
+	t.Cleanup(rt.Stop)
+
+	auth := &coreauth.Auth{ID: "codex-central", Index: "codex-central", Provider: "codex", Status: coreauth.StatusActive}
+	if _, errRegister := rt.CoreManager().Register(coreauth.WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	cooldown := time.Hour
+	rt.RecordQuotaObservation(context.Background(), auth, "exhausted", &cooldown)
+
+	updated, ok := rt.CoreManager().GetByID(auth.ID)
+	if !ok || updated == nil || !updated.Unavailable || !updated.Quota.Exceeded || updated.NextRetryAfter.IsZero() {
+		t.Fatalf("central quota cooldown was disabled by downstream config: %+v", updated)
+	}
+}
+
+func TestNewRuntimeHonorsCredentialCoolingOverride(t *testing.T) {
+	rt, errRuntime := NewRuntime(&config.Config{DisableCooling: true})
+	if errRuntime != nil {
+		t.Fatalf("NewRuntime() error = %v", errRuntime)
+	}
+	t.Cleanup(rt.Stop)
+
+	auth := &coreauth.Auth{
+		ID:       "codex-no-cooling",
+		Index:    "codex-no-cooling",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"disable_cooling": true},
+	}
+	if _, errRegister := rt.CoreManager().Register(coreauth.WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	cooldown := time.Hour
+	rt.RecordQuotaObservation(context.Background(), auth, "exhausted", &cooldown)
+
+	updated, ok := rt.CoreManager().GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("credential missing")
+	}
+	if !updated.NextRetryAfter.IsZero() || !updated.Quota.NextRecoverAt.IsZero() {
+		t.Fatalf("credential disable_cooling override retained a dispatch deadline: %+v", updated)
 	}
 }
