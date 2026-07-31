@@ -1115,17 +1115,25 @@ func RefreshRetryBackoffOpen(auth *Auth, now time.Time) bool {
 	return auth.NextRefreshAfter.After(now)
 }
 
-func accessTokenUsableAt(auth *Auth, now time.Time) bool {
+func accessTokenUsabilityAt(auth *Auth, now time.Time) (usable bool, known bool) {
 	if auth == nil || authRefreshDisabled(auth) || isUnauthorizedAuthState(auth) {
-		return false
+		return false, true
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	if expiry, ok := auth.ExpirationTime(); ok && !expiry.IsZero() {
-		return expiry.After(now)
+		return expiry.After(now), true
 	}
-	return accessTokenForFingerprint(auth) != ""
+	if accessTokenForFingerprint(auth) != "" {
+		return true, true
+	}
+	return false, false
+}
+
+func accessTokenUsableAt(auth *Auth, now time.Time) bool {
+	usable, _ := accessTokenUsabilityAt(auth, now)
+	return usable
 }
 
 // RefreshBackoffOpen reports whether a transient refresh cooldown is active.

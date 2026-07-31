@@ -600,6 +600,30 @@ func TestDispatchKeepsValidTokenAvailableDuringRefreshRetryBackoff(t *testing.T)
 	}
 }
 
+func TestDispatchAllowsLightweightRefreshRetryBackoffCandidate(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:               "lightweight-refresh-backoff",
+		Provider:         "codex",
+		Status:           StatusError,
+		StatusMessage:    refreshTransientErrorMsg,
+		Unavailable:      true,
+		NextRefreshAfter: now.Add(time.Minute),
+		NextRetryAfter:   now.Add(time.Minute),
+		LastError:        &Error{Code: refreshTransientErrorCode, Message: refreshTransientErrorMsg, Retryable: true},
+		ModelStates: map[string]*ModelState{
+			"gpt-5.6-sol": {Status: StatusActive},
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5.6-sol", now)
+	if blocked || reason != blockReasonNone {
+		t.Fatalf("lightweight refresh backoff candidate blocked=%v reason=%v next=%v, want dispatchable", blocked, reason, next)
+	}
+}
+
 func TestApplyRefreshFailureStateKeepsValidAccessTokenDispatchable(t *testing.T) {
 	t.Parallel()
 
