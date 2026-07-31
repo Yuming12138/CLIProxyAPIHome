@@ -34,6 +34,39 @@ func TestQuotaAutoMigrateCreatesSnapshotTables(t *testing.T) {
 	}
 }
 
+func TestQuotaCredentialUsesAuthPlanWithoutSnapshot(t *testing.T) {
+	ctx := context.Background()
+	repo, closeRepo := newBillingTestRepository(t, ctx)
+	defer closeRepo()
+	now := time.Date(2026, 7, 31, 15, 0, 0, 0, time.UTC)
+	auth := &coreauth.Auth{
+		ID:         "disabled-personal-auth",
+		Index:      "disabled-personal-auth",
+		Provider:   "codex",
+		Label:      "Disabled Personal",
+		Status:     coreauth.StatusDisabled,
+		Disabled:   true,
+		Attributes: map[string]string{"plan_type": "free"},
+		Metadata:   map[string]any{"type": "codex"},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if _, errUpsert := repo.UpsertAuth(ctx, auth, "test"); errUpsert != nil {
+		t.Fatalf("UpsertAuth() error = %v", errUpsert)
+	}
+
+	item, errGet := repo.GetQuotaCredential(ctx, auth.ID, now.Add(time.Minute))
+	if errGet != nil {
+		t.Fatalf("GetQuotaCredential() error = %v", errGet)
+	}
+	if item.Plan == nil || item.Plan.Name != "Free" || item.Plan.Premium {
+		t.Fatalf("auth-derived plan = %+v, want Free", item.Plan)
+	}
+	if item.CredentialStatus != "disabled" || item.Freshness != "never" {
+		t.Fatalf("credential state = %s/%s, want disabled/never", item.CredentialStatus, item.Freshness)
+	}
+}
+
 func TestAppendUsagePersistsCodexQuotaHeaderSnapshot(t *testing.T) {
 	ctx := context.Background()
 	repo, closeRepo := newBillingTestRepository(t, ctx)

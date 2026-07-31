@@ -565,6 +565,9 @@ func authFileEntry(auth *coreauth.Auth) gin.H {
 	if email := stringFromAny(auth.Metadata["email"]); email != "" {
 		entry["email"] = email
 	}
+	if planType := authFilePlanType(auth); planType != "" {
+		entry["plan_type"] = planType
+	}
 	if priority := priorityFromAuth(auth); priority != nil {
 		entry["priority"] = *priority
 	}
@@ -579,6 +582,23 @@ func authFileEntry(auth *coreauth.Auth) gin.H {
 		entry["modtime"] = auth.UpdatedAt
 	}
 	return entry
+}
+
+func authFilePlanType(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if planType := strings.TrimSpace(auth.Attributes["plan_type"]); planType != "" {
+			return planType
+		}
+	}
+	for _, key := range []string{"plan_type", "planType"} {
+		if planType := strings.TrimSpace(stringFromAny(auth.Metadata[key])); planType != "" {
+			return planType
+		}
+	}
+	return ""
 }
 
 // authFileName handles an auth file name.

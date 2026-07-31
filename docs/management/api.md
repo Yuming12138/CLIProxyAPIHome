@@ -2207,6 +2207,7 @@ Example response:
       "file_name": "auth-db-id.json",
       "type": "codex",
       "provider": "codex",
+      "plan_type": "plus",
       "label": "user@example.com",
       "status": "active",
       "status_message": "",
@@ -2230,6 +2231,8 @@ Example response:
 
 Editable metadata is projected with each list item so management clients can display and update
 the current value without downloading the credential JSON:
+
+`plan_type` is a read-only, non-secret projection used by quota and pool-management clients.
 
 | Field | Type | Description |
 | --- | --- | --- |

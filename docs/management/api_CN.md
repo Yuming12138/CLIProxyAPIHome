@@ -2207,6 +2207,7 @@ Query 参数：
       "file_name": "auth-db-id.json",
       "type": "codex",
       "provider": "codex",
+      "plan_type": "plus",
       "label": "user@example.com",
       "status": "active",
       "status_message": "",
@@ -2229,6 +2230,8 @@ Query 参数：
 ```
 
 列表项会投影可编辑元数据，Management 客户端无需下载凭证 JSON 即可展示并更新当前值：
+
+`plan_type` 是供额度与账号池管理客户端使用的只读、非敏感投影字段。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |

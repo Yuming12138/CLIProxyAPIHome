@@ -942,6 +942,7 @@ func quotaCredentialFromAuth(record AuthRecord, auth *coreauth.Auth, snapshot Qu
 		PrimaryWindows:   []QuotaWindow{},
 		Windows:          []QuotaWindow{},
 	}
+	item.Plan = quotaPlanFromAuth(provider, auth)
 	if strings.TrimSpace(snapshot.CredentialID) == "" {
 		if !quotaCredentialCollectorPlanned(provider, credentialType) {
 			item.QuotaStatus = "unsupported"
@@ -1021,6 +1022,36 @@ func quotaCredentialFromAuth(record AuthRecord, auth *coreauth.Auth, snapshot Qu
 		item.PrimaryWindows = []QuotaWindow{}
 	}
 	return item
+}
+
+func quotaPlanFromAuth(provider string, auth *coreauth.Auth) *QuotaPlan {
+	if auth == nil || normalizeQuotaProviderID(provider) != "codex" {
+		return nil
+	}
+	planType := ""
+	if auth.Attributes != nil {
+		planType = strings.TrimSpace(auth.Attributes["plan_type"])
+	}
+	if planType == "" {
+		planType = firstQuotaMetadataString(auth.Metadata, "plan_type", "planType")
+	}
+	if planType == "" {
+		return nil
+	}
+	switch strings.ToLower(planType) {
+	case "pro":
+		return &QuotaPlan{Name: "Pro 20x", Premium: true}
+	case "prolite", "pro-lite", "pro_lite":
+		return &QuotaPlan{Name: "Pro 5x", Premium: true}
+	case "plus":
+		return &QuotaPlan{Name: "Plus"}
+	case "team":
+		return &QuotaPlan{Name: "Team"}
+	case "free":
+		return &QuotaPlan{Name: "Free"}
+	default:
+		return &QuotaPlan{Name: planType}
+	}
 }
 
 func quotaWindowAggregateDTOStatus(windows []QuotaWindow) string {

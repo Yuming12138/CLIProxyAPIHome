@@ -54,6 +54,25 @@ func TestApplyOAuthFieldPatchArbitraryFields(t *testing.T) {
 	}
 }
 
+func TestAuthFileEntryIncludesNonSecretPlanType(t *testing.T) {
+	entry := authFileEntry(&coreauth.Auth{
+		ID:         "codex-plan-auth",
+		Provider:   "codex",
+		Attributes: map[string]string{"plan_type": "free"},
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "must-not-be-projected",
+		},
+	})
+
+	if entry["plan_type"] != "free" {
+		t.Fatalf("plan_type = %#v, want free", entry["plan_type"])
+	}
+	if _, exists := entry["access_token"]; exists {
+		t.Fatal("auth file entry exposed access_token")
+	}
+}
+
 func TestAuthFileEntryIncludesEditableMetadata(t *testing.T) {
 	auth := &coreauth.Auth{
 		ID:       "codex-auth",
