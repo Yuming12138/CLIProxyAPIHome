@@ -801,26 +801,27 @@ func (m *Manager) Dispatch(ctx context.Context, providers []string, requestedMod
 			var authErr *Error
 			if errors.As(errUnavailable, &authErr) && authErr.Code == "auth_unavailable" {
 				sort.Strings(candidateStates)
-				log.WithFields(log.Fields{
-					"providers":                       strings.Join(normalizedProviders, ","),
-					"model":                           routeModel,
-					"all_candidate_count":             allCandidateCount,
-					"candidate_count":                 totalCandidates,
-					"cooldown_count":                  cooldownCount,
-					"invalid_count":                   invalidCandidateCount,
-					"disabled_count":                  disabledCandidateCount,
-					"tried_count":                     triedCandidateCount,
-					"auth_scope_filtered_count":       authScopeFilteredCount,
-					"provider_filtered_count":         providerFilteredCount,
-					"registry_model_filtered_count":   registryModelFilteredCount,
-					"blocked_disabled_count":          blockedDisabledCount,
-					"blocked_other_count":             blockedOtherCount,
-					"concurrency_filtered_count":      concurrencyFilteredCount,
-					"allowed_auth_scope":              allowedAuthIDs != nil,
-					"excluded_concurrency_rule_count": len(excludedConcurrencyCandidatesFromOptions(opts)),
-					"candidate_states":                strings.Join(candidateStates, ";"),
-					"candidate_states_truncated":      candidateStateCount > len(candidateStates),
-				}).Warn("auth dispatch fallback has no ready credential")
+				log.Warnf(
+					"auth dispatch fallback has no ready credential providers=%s model=%s all_candidate_count=%d candidate_count=%d cooldown_count=%d invalid_count=%d disabled_count=%d tried_count=%d auth_scope_filtered_count=%d provider_filtered_count=%d registry_model_filtered_count=%d blocked_disabled_count=%d blocked_other_count=%d concurrency_filtered_count=%d allowed_auth_scope=%t excluded_concurrency_rule_count=%d candidate_states=%q candidate_states_truncated=%t",
+					strings.Join(normalizedProviders, ","),
+					routeModel,
+					allCandidateCount,
+					totalCandidates,
+					cooldownCount,
+					invalidCandidateCount,
+					disabledCandidateCount,
+					triedCandidateCount,
+					authScopeFilteredCount,
+					providerFilteredCount,
+					registryModelFilteredCount,
+					blockedDisabledCount,
+					blockedOtherCount,
+					concurrencyFilteredCount,
+					allowedAuthIDs != nil,
+					len(excludedConcurrencyCandidatesFromOptions(opts)),
+					strings.Join(candidateStates, ";"),
+					candidateStateCount > len(candidateStates),
+				)
 			}
 			return nil, errUnavailable
 		}
