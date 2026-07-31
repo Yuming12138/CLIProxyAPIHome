@@ -280,8 +280,9 @@ func TestAntigravityMissingProjectFailsWithoutUpstreamRequest(t *testing.T) {
 	}
 }
 
-func TestQuotaProbeEligibilitySkipsDisabledCooldownAndUnavailableCredentials(t *testing.T) {
+func TestQuotaProbeEligibilitySkipsNonQuotaCooldownAndAllowsQuotaRecheck(t *testing.T) {
 	now := time.Date(2026, 7, 16, 9, 0, 0, 0, time.UTC)
+	quotaRetryAt := now.Add(time.Hour)
 	tests := []struct {
 		name string
 		auth *coreauth.Auth
@@ -290,6 +291,8 @@ func TestQuotaProbeEligibilitySkipsDisabledCooldownAndUnavailableCredentials(t *
 		{name: "active", auth: &coreauth.Auth{ID: "active", Provider: "codex", Status: coreauth.StatusActive, Metadata: map[string]any{"type": "codex"}}, want: true},
 		{name: "disabled", auth: &coreauth.Auth{ID: "disabled", Provider: "codex", Status: coreauth.StatusDisabled, Disabled: true}, want: false},
 		{name: "cooldown", auth: &coreauth.Auth{ID: "cooldown", Provider: "codex", Status: coreauth.StatusActive, NextRetryAfter: now.Add(time.Minute)}, want: false},
+		{name: "quota cooldown", auth: &coreauth.Auth{ID: "quota-cooldown", Provider: "codex", Status: coreauth.StatusError, Unavailable: true, NextRetryAfter: quotaRetryAt, Quota: coreauth.QuotaState{Exceeded: true, NextRecoverAt: quotaRetryAt}}, want: true},
+		{name: "quota plus refresh backoff", auth: &coreauth.Auth{ID: "quota-refresh-backoff", Provider: "codex", Status: coreauth.StatusError, StatusMessage: "credential refresh temporarily unavailable", Unavailable: true, NextRetryAfter: quotaRetryAt, Quota: coreauth.QuotaState{Exceeded: true, NextRecoverAt: quotaRetryAt}}, want: false},
 		{name: "expired cooldown", auth: &coreauth.Auth{ID: "expired-cooldown", Provider: "codex", Status: coreauth.StatusError, Unavailable: true, NextRetryAfter: now.Add(-time.Minute)}, want: true},
 		{name: "unavailable without future cooldown", auth: &coreauth.Auth{ID: "unavailable", Provider: "codex", Status: coreauth.StatusError, Unavailable: true}, want: true},
 		{name: "provider api key", auth: &coreauth.Auth{ID: "api-key", Provider: "xai", Status: coreauth.StatusActive, Attributes: map[string]string{"source": "config:xai", "api_key": "secret"}}, want: false},

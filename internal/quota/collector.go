@@ -652,7 +652,7 @@ func quotaProbeEligible(auth *coreauth.Auth, now time.Time) bool {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" || auth.Disabled || auth.Status == coreauth.StatusDisabled {
 		return false
 	}
-	if !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
+	if !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) && !quotaCooldownAllowsProbe(auth, now) {
 		return false
 	}
 	if quotaProviderAPIKeyAuth(auth) {
@@ -664,6 +664,16 @@ func quotaProbeEligible(auth *coreauth.Auth, now time.Time) bool {
 	default:
 		return false
 	}
+}
+
+// quotaCooldownAllowsProbe keeps business dispatch blocked while allowing the
+// quota collector to detect an official or operator-triggered early reset.
+// Refresh failures remain protected by their retry deadline.
+func quotaCooldownAllowsProbe(auth *coreauth.Auth, now time.Time) bool {
+	if auth == nil || coreauth.RefreshBackoffOpen(auth, now) {
+		return false
+	}
+	return auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now)
 }
 
 func quotaProviderAPIKeyAuth(auth *coreauth.Auth) bool {
