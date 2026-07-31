@@ -97,6 +97,40 @@ func TestNewRuntimeKeepsCentralQuotaCoolingEnabled(t *testing.T) {
 	}
 }
 
+func TestNewRuntimeCentralQuotaCoolingDoesNotEnableTransientCooldowns(t *testing.T) {
+	rt, errRuntime := NewRuntime(&config.Config{DisableCooling: true})
+	if errRuntime != nil {
+		t.Fatalf("NewRuntime() error = %v", errRuntime)
+	}
+	t.Cleanup(rt.Stop)
+
+	auth := &coreauth.Auth{ID: "codex-transient", Index: "codex-transient", Provider: "codex", Status: coreauth.StatusActive}
+	if _, errRegister := rt.CoreManager().Register(coreauth.WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	rt.CoreManager().MarkResult(context.Background(), coreauth.Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gpt-5",
+		Error: &coreauth.Error{
+			Message:    "transient upstream error",
+			HTTPStatus: http.StatusBadGateway,
+		},
+	})
+
+	updated, ok := rt.CoreManager().GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("credential missing")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if state == nil {
+		t.Fatal("transient result did not record model state")
+	}
+	if !state.NextRetryAfter.IsZero() || updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("central quota cooling created a transient dispatch blackout: auth=%+v model=%+v", updated, state)
+	}
+}
+
 func TestNewRuntimeHonorsCredentialCoolingOverride(t *testing.T) {
 	rt, errRuntime := NewRuntime(&config.Config{DisableCooling: true})
 	if errRuntime != nil {

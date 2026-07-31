@@ -2,12 +2,14 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPIHome/internal/registry"
+	log "github.com/sirupsen/logrus"
 )
 
 // schedulerStrategy identifies which built-in routing semantics the scheduler should apply.
@@ -812,7 +814,69 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		}
 		return newModelCooldownError(model, providerForError, resetIn)
 	}
+	log.WithFields(log.Fields{
+		"provider":         provider,
+		"model":            model,
+		"candidate_count":  total,
+		"cooldown_count":   cooldownCount,
+		"candidate_states": strings.Join(m.unavailableStateDetailsLocked(predicate, now), ";"),
+	}).Warn("auth scheduler has no ready credential")
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
+}
+
+func (m *modelScheduler) unavailableStateDetailsLocked(predicate func(*scheduledAuth) bool, now time.Time) []string {
+	if m == nil {
+		return nil
+	}
+	details := make([]string, 0, len(m.entries))
+	for _, entry := range m.entries {
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		if entry == nil || entry.auth == nil {
+			details = append(details, "auth=none,state=invalid")
+			continue
+		}
+		auth := entry.auth
+		authRef := strings.TrimSpace(auth.ID)
+		if len(authRef) > 8 {
+			authRef = authRef[:8]
+		}
+		modelStatus := StatusUnknown
+		modelUnavailable := false
+		modelQuotaExceeded := false
+		modelRetryMS := int64(0)
+		modelKey := m.runtimeModelKeyForAuth(auth)
+		if state := auth.ModelStates[modelKey]; state != nil {
+			modelStatus = state.Status
+			modelUnavailable = state.Unavailable
+			modelQuotaExceeded = state.Quota.Exceeded
+			modelRetryMS = retryAfterMilliseconds(now, state.NextRetryAfter)
+		}
+		details = append(details, fmt.Sprintf(
+			"auth=%s,state=%d,status=%s,unavailable=%t,refresh_backoff=%t,quota=%t,retry_ms=%d,model_status=%s,model_unavailable=%t,model_quota=%t,model_retry_ms=%d",
+			authRef,
+			entry.state,
+			auth.Status,
+			auth.Unavailable,
+			RefreshBackoffOpen(auth, now),
+			auth.Quota.Exceeded,
+			retryAfterMilliseconds(now, auth.NextRetryAfter),
+			modelStatus,
+			modelUnavailable,
+			modelQuotaExceeded,
+			modelRetryMS,
+		))
+	}
+	sort.Strings(details)
+	return details
+}
+
+func retryAfterMilliseconds(now, retryAt time.Time) int64 {
+	if retryAt.IsZero() || !retryAt.After(now) {
+		return 0
+	}
+	return retryAt.Sub(now).Milliseconds()
 }
 
 // availabilitySummaryLocked summarizes total candidates, cooldown count, and earliest retry time.

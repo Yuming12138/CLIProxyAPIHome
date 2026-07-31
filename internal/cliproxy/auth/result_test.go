@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPIHome/internal/config"
 )
 
 type markResultBlockingStore struct {
@@ -156,6 +158,32 @@ func TestMarkResultUnauthorizedUsesRecoverableCooldown(t *testing.T) {
 	}
 	if blocked, reason, _ := isAuthBlockedForModel(updated, "gpt-5", time.Now()); !blocked || reason == blockReasonDisabled {
 		t.Fatalf("isAuthBlockedForModel() = blocked %v reason %v, want non-disabled cooldown", blocked, reason)
+	}
+}
+
+func TestCentralQuotaCoolingDoesNotBlackoutDispatchAfterTransientError(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{DisableCooling: true})
+	manager.SetCentralQuotaCooling(true)
+	auth := &Auth{ID: "auth-transient", Index: "auth-transient", Provider: "codex", Status: StatusActive}
+	registerDispatchTestAuth(t, manager, auth, "gpt-5")
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gpt-5",
+		Error: &Error{
+			Message:    "transient upstream error",
+			HTTPStatus: http.StatusBadGateway,
+		},
+	})
+
+	decision, errDispatch := manager.Dispatch(context.Background(), []string{"codex"}, "gpt-5", Options{})
+	if errDispatch != nil {
+		t.Fatalf("Dispatch() after transient result error = %v", errDispatch)
+	}
+	if decision == nil || decision.Auth == nil || decision.Auth.ID != auth.ID {
+		t.Fatalf("Dispatch() after transient result = %#v, want %s", decision, auth.ID)
 	}
 }
 

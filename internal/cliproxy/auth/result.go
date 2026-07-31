@@ -174,7 +174,8 @@ func (m *Manager) applyResultTransition(auth *Auth, result Result, resultModel s
 		authBackoff := authScopedBackoffOpen(auth, now)
 		authRetryAfter := auth.NextRetryAfter
 		authQuota := auth.Quota
-		disableCooling := m.quotaCooldownDisabledForAuth(auth)
+		statusCode := statusCodeFromResult(result.Error)
+		disableCooling := m.coolingDisabledForAuth(auth, statusCode)
 		state := ensureModelState(auth, resultModel)
 		state.Unavailable = true
 		state.Status = StatusError
@@ -188,7 +189,6 @@ func (m *Manager) applyResultTransition(auth *Auth, result Result, resultModel s
 			}
 		}
 
-		statusCode := statusCodeFromResult(result.Error)
 		if isModelSupportResultError(result.Error) {
 			next := now.Add(12 * time.Hour)
 			state.NextRetryAfter = next
@@ -470,6 +470,14 @@ func (m *Manager) resultAuthLocked(result Result) *Auth {
 
 // quotaCooldownDisabledForAuth returns a quota cooldown disabled for auth.
 func (m *Manager) quotaCooldownDisabledForAuth(auth *Auth) bool {
+	return m.coolingDisabledForAuth(auth, http.StatusTooManyRequests)
+}
+
+// coolingDisabledForAuth reports whether the requested result class should
+// skip cooldown scheduling. Central quota authority only overrides the global
+// disable-cooling setting for quota results; it must not turn transient
+// upstream failures into dispatch blackouts.
+func (m *Manager) coolingDisabledForAuth(auth *Auth, statusCode int) bool {
 	if auth != nil {
 		if override, ok := auth.DisableCoolingOverride(); ok {
 			if override {
@@ -477,7 +485,7 @@ func (m *Manager) quotaCooldownDisabledForAuth(auth *Auth) bool {
 			}
 		}
 	}
-	if m != nil && m.centralCooling.Load() {
+	if statusCode == http.StatusTooManyRequests && m != nil && m.centralQuotaCooling.Load() {
 		return false
 	}
 	cfg, _ := m.runtimeConfig.Load().(*config.Config)
@@ -779,7 +787,8 @@ func applyAuthFailureState(m *Manager, auth *Auth, resultErr *Error, retryAfter 
 	if isRequestScopedNotFoundResultError(resultErr) {
 		return
 	}
-	disableCooling := m.quotaCooldownDisabledForAuth(auth)
+	statusCode := statusCodeFromResult(resultErr)
+	disableCooling := m.coolingDisabledForAuth(auth, statusCode)
 	auth.Unavailable = true
 	auth.Status = StatusError
 	auth.UpdatedAt = now
@@ -789,7 +798,6 @@ func applyAuthFailureState(m *Manager, auth *Auth, resultErr *Error, retryAfter 
 			auth.StatusMessage = resultErr.Message
 		}
 	}
-	statusCode := statusCodeFromResult(resultErr)
 	switch statusCode {
 	case http.StatusUnauthorized:
 		auth.StatusMessage = "unauthorized"

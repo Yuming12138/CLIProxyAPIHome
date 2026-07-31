@@ -63,9 +63,9 @@ type Manager struct {
 	indexAuth map[string]*Auth
 	scheduler *authScheduler
 
-	oauthModelAlias atomic.Value
-	runtimeConfig   atomic.Value
-	centralCooling  atomic.Bool
+	oauthModelAlias     atomic.Value
+	runtimeConfig       atomic.Value
+	centralQuotaCooling atomic.Bool
 
 	rtProvider         RoundTripperProvider
 	fullResolver       FullAuthResolver
@@ -175,7 +175,7 @@ func (m *Manager) SetCentralQuotaCooling(enabled bool) {
 	if m == nil {
 		return
 	}
-	m.centralCooling.Store(enabled)
+	m.centralQuotaCooling.Store(enabled)
 }
 
 // SetSelector sets a selector.
