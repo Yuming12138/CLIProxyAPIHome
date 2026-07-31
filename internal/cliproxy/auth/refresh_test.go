@@ -567,3 +567,59 @@ func TestApplyRefreshSuccessStateClearsOrphanedUnavailableRetry(t *testing.T) {
 		t.Fatalf("orphaned state after refresh success = %#v, want active dispatchable", auth)
 	}
 }
+
+func TestDispatchKeepsValidTokenAvailableDuringRefreshRetryBackoff(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, nil, nil)
+	now := time.Now().UTC()
+	retryAt := now.Add(time.Minute)
+	auth := &Auth{
+		ID:               "auth-valid-token-refresh-backoff",
+		Index:            "auth-valid-token-refresh-backoff",
+		Provider:         "codex",
+		Status:           StatusError,
+		StatusMessage:    refreshTransientErrorMsg,
+		Unavailable:      true,
+		NextRefreshAfter: retryAt,
+		NextRetryAfter:   retryAt,
+		LastError:        &Error{Code: refreshTransientErrorCode, Message: refreshTransientErrorMsg, Retryable: true},
+		Metadata: map[string]any{
+			"access_token": "usable-access-token",
+			"expired":      now.Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	registerDispatchTestAuth(t, manager, auth, "gpt-5")
+
+	if blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5", now); blocked {
+		t.Fatalf("valid token refresh backoff blocked dispatch: reason=%v next=%v", reason, next)
+	}
+	decision, errDispatch := manager.Dispatch(context.Background(), []string{"codex"}, "gpt-5", Options{})
+	if errDispatch != nil || decision == nil || decision.Auth == nil || decision.Auth.ID != auth.ID {
+		t.Fatalf("Dispatch() = decision %#v error %v, want usable credential", decision, errDispatch)
+	}
+}
+
+func TestApplyRefreshFailureStateKeepsValidAccessTokenDispatchable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:       "auth-request-refresh-valid-token",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "usable-access-token",
+			"expired":      now.Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	ApplyRefreshFailureState(auth, errors.New("temporary refresh outage"), now)
+
+	if auth.Unavailable || auth.Status != StatusActive || !auth.NextRetryAfter.IsZero() || auth.LastError != nil {
+		t.Fatalf("request refresh failure blocked valid token: %#v", auth)
+	}
+	if !auth.NextRefreshAfter.Equal(now.Add(refreshFailureBackoff)) {
+		t.Fatalf("NextRefreshAfter = %v, want %v", auth.NextRefreshAfter, now.Add(refreshFailureBackoff))
+	}
+}

@@ -277,7 +277,7 @@ func (c *RefreshController) refreshLocalWithLock(ctx context.Context, authIndex 
 			skipRefresh = true
 			return false
 		}
-		if refreshLeaseActive(auth, now) || (!background && coreauth.RefreshBackoffOpen(auth, now)) || (background && coreauth.RefreshRetryBackoffOpen(auth, now)) {
+		if refreshLeaseActive(auth, now) || coreauth.RefreshRetryBackoffOpen(auth, now) {
 			refreshErr = coreauth.NewTransientRefreshError()
 			skipRefresh = true
 			return false

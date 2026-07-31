@@ -1287,7 +1287,7 @@ func applyRefreshFailureStateWithDispatch(auth *Auth, errRefresh error, now time
 		disableAuthAfterUnauthorized(auth, nil, newUnauthorizedRefreshError(), now)
 		return
 	}
-	if keepUsableTokenDispatchable && accessTokenUsableAt(auth, now) {
+	if (keepUsableTokenDispatchable || !hasModelError(auth, now)) && accessTokenUsableAt(auth, now) {
 		clearRefreshDispatchState(auth, now)
 		auth.NextRefreshAfter = now.Add(refreshFailureBackoff)
 		auth.UpdatedAt = now

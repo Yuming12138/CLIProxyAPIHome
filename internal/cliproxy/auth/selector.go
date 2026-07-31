@@ -312,18 +312,22 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
-	if RefreshBackoffOpen(auth, now) {
+	if RefreshBackoffOpen(auth, now) && refreshBackoffBlocksDispatch(auth, now) {
 		return true, blockReasonOther, auth.NextRetryAfter
 	}
 	if auth.Unavailable && auth.NextRetryAfter.After(now) && !authUnavailableAggregatedFromModels(auth, now) {
-		next := auth.NextRetryAfter
-		if auth.Quota.NextRecoverAt.After(next) {
-			next = auth.Quota.NextRecoverAt
+		if isTransientRefreshState(auth) && !refreshBackoffBlocksDispatch(auth, now) {
+			// A refresh retry window should not hide an otherwise usable token.
+		} else {
+			next := auth.NextRetryAfter
+			if auth.Quota.NextRecoverAt.After(next) {
+				next = auth.Quota.NextRecoverAt
+			}
+			if auth.Quota.Exceeded {
+				return true, blockReasonCooldown, next
+			}
+			return true, blockReasonOther, next
 		}
-		if auth.Quota.Exceeded {
-			return true, blockReasonCooldown, next
-		}
-		return true, blockReasonOther, next
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
@@ -375,6 +379,16 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
+}
+
+func refreshBackoffBlocksDispatch(auth *Auth, now time.Time) bool {
+	if !RefreshBackoffOpen(auth, now) {
+		return false
+	}
+	if auth == nil || auth.Quota.Exceeded || isUnauthorizedAuthState(auth) {
+		return true
+	}
+	return !accessTokenUsableAt(auth, now)
 }
 
 func authScopedBackoffOpen(auth *Auth, now time.Time) bool {

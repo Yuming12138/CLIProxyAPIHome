@@ -681,8 +681,8 @@ func TestRefreshControllerTransientBackoffDeduplicatesStaleRefreshes(t *testing.
 	if errAuth != nil {
 		t.Fatalf("GetAuth() error = %v", errAuth)
 	}
-	if persisted.Disabled || !coreauth.RefreshBackoffOpen(persisted, time.Now().UTC()) {
-		t.Fatalf("persisted transient refresh state = %#v", persisted)
+	if persisted.Disabled || !coreauth.RefreshRetryBackoffOpen(persisted, time.Now().UTC()) || persisted.Unavailable {
+		t.Fatalf("persisted transient refresh state = %#v, want retry backoff without dispatch block", persisted)
 	}
 }
 
