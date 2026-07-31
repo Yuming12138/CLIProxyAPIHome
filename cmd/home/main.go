@@ -408,6 +408,26 @@ func run() int {
 	userMailService := usermail.NewService(repo, func() *config.Config { return rt.Config() })
 	userMailService.Start(runCtx)
 	quotaHomeID := net.JoinHostPort(clusterClientAddr, strconv.Itoa(clusterAdvertisedPort))
+	resolveQuotaAuth := func(ctx context.Context, candidate *coreauth.Auth, forceRefresh bool) (*coreauth.Auth, error) {
+		if candidate == nil {
+			return nil, fmt.Errorf("quota collector credential is nil")
+		}
+		current, _, errAuth := repo.GetAuth(ctx, candidate.ID)
+		if errAuth != nil {
+			return nil, errAuth
+		}
+		manager := rt.CoreManager()
+		if forceRefresh || (manager != nil && manager.ShouldRefreshCredential(current, time.Now().UTC())) {
+			if _, errRefresh := rt.RefreshNow(ctx, current.ID); errRefresh != nil {
+				return nil, errRefresh
+			}
+			current, _, errAuth = repo.GetAuth(ctx, candidate.ID)
+			if errAuth != nil {
+				return nil, errAuth
+			}
+		}
+		return current, nil
+	}
 	quotaCollector := quotacollector.NewCollector(repo, quotacollector.Options{
 		HomeID: quotaHomeID,
 		GlobalProxyURLProvider: func() string {
@@ -421,24 +441,10 @@ func run() int {
 			rt.RecordQuotaObservation(ctx, auth, observation.QuotaStatus, observation.RetryAfter)
 		},
 		ResolveAuth: func(ctx context.Context, candidate *coreauth.Auth) (*coreauth.Auth, error) {
-			if candidate == nil {
-				return nil, fmt.Errorf("quota collector credential is nil")
-			}
-			current, _, errAuth := repo.GetAuth(ctx, candidate.ID)
-			if errAuth != nil {
-				return nil, errAuth
-			}
-			manager := rt.CoreManager()
-			if manager != nil && manager.ShouldRefreshCredential(current, time.Now().UTC()) {
-				if _, errRefresh := rt.RefreshNow(ctx, current.ID); errRefresh != nil {
-					return nil, errRefresh
-				}
-				current, _, errAuth = repo.GetAuth(ctx, candidate.ID)
-				if errAuth != nil {
-					return nil, errAuth
-				}
-			}
-			return current, nil
+			return resolveQuotaAuth(ctx, candidate, false)
+		},
+		ForceRefreshAuth: func(ctx context.Context, candidate *coreauth.Auth) (*coreauth.Auth, error) {
+			return resolveQuotaAuth(ctx, candidate, true)
 		},
 	})
 	quotaCollector.Start(runCtx)
@@ -459,14 +465,15 @@ func run() int {
 	mgmtOpts := make([]managementhttp.RouteOption, 0, 1)
 	if clusterRepo != nil {
 		mgmtOpts = append(mgmtOpts, managementhttp.WithDatabaseManagement(managementhttp.DatabaseManagementOption{
-			Enabled:          true,
-			Repository:       clusterRepo,
-			Runtime:          rt,
-			NodeIP:           clusterClientAddr,
-			NodePort:         clusterAdvertisedPort,
-			HeartbeatTimeout: nodeCfg.HeartbeatTimeout,
-			ForwardTLSConfig: clusterTLSConfig,
-			QuotaRecollect:   quotaCollector,
+			Enabled:                  true,
+			Repository:               clusterRepo,
+			Runtime:                  rt,
+			NodeIP:                   clusterClientAddr,
+			NodePort:                 clusterAdvertisedPort,
+			HeartbeatTimeout:         nodeCfg.HeartbeatTimeout,
+			ForwardTLSConfig:         clusterTLSConfig,
+			QuotaRecollect:           quotaCollector,
+			QuotaResetCreditConsumer: quotaCollector,
 		}))
 	}
 	mgmtBuild, errMgmt := managementhttp.Build(cfgPath, mgmtOpts...)

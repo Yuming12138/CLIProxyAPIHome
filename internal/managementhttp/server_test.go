@@ -184,6 +184,7 @@ func TestClusterManagementUsageObservabilityRoutesRegistered(t *testing.T) {
 		{Method: http.MethodGet, Path: "/capabilities"},
 		{Method: http.MethodGet, Path: "/quota/credentials"},
 		{Method: http.MethodGet, Path: "/quota/credentials/:credential_id"},
+		{Method: http.MethodPost, Path: "/quota/credentials/:credential_id/reset-credits/consume"},
 		{Method: http.MethodGet, Path: "/usage/overview"},
 		{Method: http.MethodGet, Path: "/usage/records"},
 		{Method: http.MethodGet, Path: "/usage/records/:id"},

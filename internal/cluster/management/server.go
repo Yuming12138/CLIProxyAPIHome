@@ -16,16 +16,25 @@ import (
 )
 
 type Handler struct {
-	repo                  *cluster.Repository
-	runtime               *home.Runtime
-	nodeIP                string
-	nodePort              int
-	heartbeatTimeout      time.Duration
-	forwardTLSConfig      *tls.Config
-	pluginStoreHTTPClient pluginstore.HTTPDoer
-	modelsDevHTTPClient   *http.Client
-	pluginStoreAuth       *pluginauth.Service
-	quotaRecollect        QuotaRecollectTrigger
+	repo                     *cluster.Repository
+	runtime                  *home.Runtime
+	nodeIP                   string
+	nodePort                 int
+	heartbeatTimeout         time.Duration
+	forwardTLSConfig         *tls.Config
+	pluginStoreHTTPClient    pluginstore.HTTPDoer
+	modelsDevHTTPClient      *http.Client
+	pluginStoreAuth          *pluginauth.Service
+	quotaRecollect           QuotaRecollectTrigger
+	quotaResetCreditConsumer QuotaResetCreditConsumer
+}
+
+// SetQuotaResetCreditConsumer injects the Home-owned reset-credit consumer.
+func (h *Handler) SetQuotaResetCreditConsumer(consumer QuotaResetCreditConsumer) {
+	if h == nil {
+		return
+	}
+	h.quotaResetCreditConsumer = consumer
 }
 
 // NewHandler creates a new handler.

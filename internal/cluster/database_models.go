@@ -81,6 +81,7 @@ var homeDatabaseModels = currentDatabaseModels()
 
 var databaseMigrationOnlyModels = []databaseModel{
 	newDatabaseModel[ClusterMasterGateRecord]("cluster_master_gate", []string{"id"}, false, false),
+	newDatabaseModel[QuotaResetCreditConsumeRecord]("quota_reset_credit_consume", []string{"credential_id"}, false, false),
 	newDatabaseModel[ManagementInFlightSnapshotCursorRecord]("management_in_flight_snapshot_cursors", []string{"cursor"}, false, false),
 	newDatabaseModel[ManagementInFlightSnapshotCursorItemRecord]("management_in_flight_snapshot_cursor_items", []string{"cursor", "ordinal"}, false, false),
 	newDatabaseModel[ManagementInFlightSnapshotCursorObservedRecord]("management_in_flight_snapshot_cursor_observed", []string{"cursor", "credential_id"}, false, false),

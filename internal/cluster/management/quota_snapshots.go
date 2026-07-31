@@ -25,6 +25,7 @@ type quotaHTTPError struct {
 }
 
 type quotaResetCreditDTO struct {
+	Key       string     `json:"key"`
 	Status    string     `json:"status"`
 	GrantedAt time.Time  `json:"granted_at"`
 	ExpiresAt *time.Time `json:"expires_at"`
@@ -48,7 +49,8 @@ func quotaResetCreditsDTOFrom(value *cluster.QuotaResetCredits) *quotaResetCredi
 			expiresAt = &expiresAtUTC
 		}
 		credits = append(credits, quotaResetCreditDTO{
-			Status: credit.Status, GrantedAt: credit.GrantedAt.UTC(), ExpiresAt: expiresAt,
+			Key: cluster.QuotaResetCreditPublicKey(credit.ID), Status: credit.Status,
+			GrantedAt: credit.GrantedAt.UTC(), ExpiresAt: expiresAt,
 		})
 	}
 	return &quotaResetCreditsDTO{

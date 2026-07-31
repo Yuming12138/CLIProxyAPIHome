@@ -107,6 +107,7 @@ DB-backed handler 通常同时返回机器可读 `error` 和可读 `message`：
 | `GET` | `/capabilities` |
 | `GET` | `/quota/credentials` |
 | `GET` | `/quota/credentials/:credential_id` |
+| `POST` | `/quota/credentials/:credential_id/reset-credits/consume` |
 | `POST` | `/quota/collect` |
 | `DELETE` | `/api-keys` |
 | `GET` | `/api-keys` |
@@ -2675,6 +2676,7 @@ Home 管理的 CPA 使用数据库支持的 observation 配置。`credential-in-
 | `capabilities.quota_snapshots` | boolean | 是否支持 DB-backed `GET /quota/credentials` 额度快照列表。 |
 | `capabilities.quota_snapshot_details` | boolean | 是否支持 `GET /quota/credentials/:credential_id`。 |
 | `capabilities.quota_recollect` | boolean | 是否支持 `POST /quota/collect` 按需额度采集。 |
+| `capabilities.quota_reset_credit_consume` | boolean | 是否支持由 Home 持有凭证并带安全校验的 Codex reset-credit 消费。 |
 | `capabilities.usage_overview` | boolean | 是否支持 `GET /usage/overview`。 |
 | `capabilities.usage_records` | boolean | 是否支持 `GET /usage/records`。 |
 | `capabilities.usage_record_details` | boolean | 是否支持 `GET /usage/records/:id`。 |
@@ -2712,7 +2714,7 @@ Home 管理的 CPA 使用数据库支持的 observation 配置。`credential-in-
 
 当前被动采集从 CPA usage 事件的 `response_headers` 中提取受限 `quota_headers`。Home 只保留 Codex `X-Codex-*` 额度 Header allowlist，以及通过语法校验且不具有 secret 特征的 upstream request ID，并在 usage payload 入库前删除 raw `response_headers`。入库前会按 active auth UUID、runtime index、ID 依次解析上报的 `auth_index`，快照始终使用稳定 UUID。Codex Header 观测与 usage record 在同一事务中归一化并 upsert；非法额度元数据会被隔离，不能回滚核心 usage 或 billing 写入。比 Home 接收时间超前五分钟以上的时间戳会归一化为接收时间。迟到事件不能覆盖更新快照，首次并发写入也遵守该规则。Codex Header 观测始终视为稀疏滚动更新：按稳定 limit 身份和周期合并，保留仍有效的旧窗口以及权威主动探测得到的元数据，不清除正在执行的 probe lease，不延后下一次主动探测，也不绕过失败重试退避。无前缀 Primary/Secondary 窗口仅在 `X-Codex-Active-Limit` 提供合法 limit 身份时摄取：`codex` 与 `premium` 映射到默认 account family，`codex_bengalfox` 映射到 Spark model family，其他合法身份保持为彼此隔离的 model family。active-limit 缺失或非法时只忽略无前缀窗口，明确分组的窗口仍可使用。同一 active family 也出现在明确分组中时，身份与周期相同的窗口合并为一项：额度值以无前缀观测为准，label 可由明确分组补充。同一 limit 周期重复出现的 Primary/Secondary 观测也会合并为一个窗口；已过期窗口不会参与新快照状态汇总。
 
-Home 同时为 Claude、Antigravity、Codex、Kimi、xAI 的 OAuth/file credential 运行固定目标主动 collector。Codex 读取官方 usage endpoint，使用 `metered_feature` 作为 additional limit 的稳定身份，并推导规范化套餐元数据。无论 usage 汇总是否包含 `rate_limit_reset_credits`，collector 都会独立查询 reset-credit 详情 endpoint。详情请求失败且 usage 汇总报告了正数当前次数时，collection 返回 `partial`，保存本次最新次数和空详情列表，不再沿用旧数量或已过期 credit；两个 endpoint 都没有提供可靠 reset-credit 信息时，会清除旧 reset-credit 数据，但不影响仍然可用的额度窗口。Codex `primary_windows` 会分别保留默认 account family 与 `codex_bengalfox` family 的一个代表窗口，并在每个 family 内优先最长周期（通常为 weekly），因此默认 5 小时窗口或 code-review limit 不会挤掉 Spark。使用位置型 `*-primary`/`*-secondary` ID 的 Codex v1 旧快照会触发一次立即 v2 主动重采集，即使 freshness 或 `next_probe_at` 原本会推迟采集；升级尝试会在发起请求前记录，失败后恢复正常 retry backoff，不会持续绕过退避。旧 raw windows 仍保留用于诊断，但成功升级前 API 表现为 `unknown`/`stale`，升级失败后表现为 `error`/`stale`；v2 成功后原子替换旧 ID，后续被动 Header 观测也不能降低快照版本。Management API 不提供消费 reset credit 的操作。Claude 查询 usage 和 profile，额度成功但 profile 元数据失败时返回 `partial`。Antigravity 携带 credential `project_id` 请求分组额度汇总 endpoint，只将 `gemini-5h`、`gemini-weekly`、`3p-5h` 和 `3p-weekly` 映射到稳定的 `gemini` 与 `third-party` model scope。数字、数字字符串和百分数字符串形式的比例都可解析；disabled、未知或畸形 bucket 会被逐项忽略。只有两个 weekly bucket 都有效时，响应才可以替换最后已知快照；两个 5 小时 bucket 分别可选，不要求成对出现。`primary_windows` 每个稳定 scope 保留一个窗口，并在存在时优先该 scope 的 5 小时窗口。使用旧模型 ID 的 Antigravity v1 快照会立即触发 v2 重采集；升级期间 API 返回 `unknown`/`stale`，失败后返回 `error`/`stale` 并遵循正常 retry backoff，成功后原子替换旧模型窗口。Kimi 查询 coding usage，保留账号 usage 汇总和每个 limit 窗口，并兼容数字或字符串形式的数值字段。Kimi 的 Provider limit 优先进入 `primary_windows`，避免聚合 summary 挤掉周限额或 duration 限额。xAI 使用 Grok CLI token-auth、client-version、user-agent 及可选 user-ID Header 请求 billing endpoint；支持 camelCase/snake_case 字段，以及 `{ "val": ... }`、数字或字符串 cents。`monthlyLimit=15000` 推导为 SuperGrok，`monthlyLimit=150000` 推导为 SuperGrok Heavy；正数 `onDemandCap` 配合显式或推导出的 `onDemandUsed` 生成 `xai-on-demand` 月度 USD 窗口，cap 缺失或为 0 表示未启用按量付费，不输出该窗口。无法使用这些 OAuth collector 的 Provider API-key credential 返回 `unsupported`。
+Home 同时为 Claude、Antigravity、Codex、Kimi、xAI 的 OAuth/file credential 运行固定目标主动 collector。Codex 读取官方 usage endpoint，使用 `metered_feature` 作为 additional limit 的稳定身份，并推导规范化套餐元数据。无论 usage 汇总是否包含 `rate_limit_reset_credits`，collector 都会独立查询 reset-credit 详情 endpoint。详情请求失败且 usage 汇总报告了正数当前次数时，collection 返回 `partial`，保存本次最新次数和空详情列表，不再沿用旧数量或已过期 credit；两个 endpoint 都没有提供可靠 reset-credit 信息时，会清除旧 reset-credit 数据，但不影响仍然可用的额度窗口。Codex `primary_windows` 会分别保留默认 account family 与 `codex_bengalfox` family 的一个代表窗口，并在每个 family 内优先最长周期（通常为 weekly），因此默认 5 小时窗口或 code-review limit 不会挤掉 Spark。使用位置型 `*-primary`/`*-secondary` ID 的 Codex v1 旧快照会触发一次立即 v2 主动重采集，即使 freshness 或 `next_probe_at` 原本会推迟采集；升级尝试会在发起请求前记录，失败后恢复正常 retry backoff，不会持续绕过退避。旧 raw windows 仍保留用于诊断，但成功升级前 API 表现为 `unknown`/`stale`，升级失败后表现为 `error`/`stale`；v2 成功后原子替换旧 ID，后续被动 Header 观测也不能降低快照版本。采集和读取接口永远不会消费 reset credit；下文由 capability 显式声明的受保护变更接口，是 Home Management 唯一可以执行消费的操作。Claude 查询 usage 和 profile，额度成功但 profile 元数据失败时返回 `partial`。Antigravity 携带 credential `project_id` 请求分组额度汇总 endpoint，只将 `gemini-5h`、`gemini-weekly`、`3p-5h` 和 `3p-weekly` 映射到稳定的 `gemini` 与 `third-party` model scope。数字、数字字符串和百分数字符串形式的比例都可解析；disabled、未知或畸形 bucket 会被逐项忽略。只有两个 weekly bucket 都有效时，响应才可以替换最后已知快照；两个 5 小时 bucket 分别可选，不要求成对出现。`primary_windows` 每个稳定 scope 保留一个窗口，并在存在时优先该 scope 的 5 小时窗口。使用旧模型 ID 的 Antigravity v1 快照会立即触发 v2 重采集；升级期间 API 返回 `unknown`/`stale`，失败后返回 `error`/`stale` 并遵循正常 retry backoff，成功后原子替换旧模型窗口。Kimi 查询 coding usage，保留账号 usage 汇总和每个 limit 窗口，并兼容数字或字符串形式的数值字段。Kimi 的 Provider limit 优先进入 `primary_windows`，避免聚合 summary 挤掉周限额或 duration 限额。xAI 使用 Grok CLI token-auth、client-version、user-agent 及可选 user-ID Header 请求 billing endpoint；支持 camelCase/snake_case 字段，以及 `{ "val": ... }`、数字或字符串 cents。`monthlyLimit=15000` 推导为 SuperGrok，`monthlyLimit=150000` 推导为 SuperGrok Heavy；正数 `onDemandCap` 配合显式或推导出的 `onDemandUsed` 生成 `xai-on-demand` 月度 USD 窗口，cap 缺失或为 0 表示未启用按量付费，不输出该窗口。无法使用这些 OAuth collector 的 Provider API-key credential 返回 `unsupported`。
 
 collector 直接读取 DB 凭证，不接受 HMC 提交 URL。探测前会重新解析最新 DB 凭证，并在 runtime 刷新策略判定到期时刷新 OAuth 状态；全局代理使用热更新后的当前配置，凭证级代理仍优先。统一使用 20 秒 timeout、PostgreSQL 下每个 Provider 并发上限 3（SQLite 下全局为 1）、单凭证 DB 租约，以及从 5 分钟开始、带凭证级 jitter、约 1 小时封顶的指数退避；`Retry-After` 可延后下次尝试。禁用凭证以及非额度型 retry deadline 仍在未来的凭证不会被主动探测；额度耗尽产生的业务调度 cooldown 不会阻止 collector，后台仍按成功快照默认 30 分钟的 freshness 复查，以发现官方时间变化或提前手动重置。探测确认 `healthy` 或 `low` 后会立即清除额度 cooldown；`POST /quota/collect` 可用于不等待下一轮的即时复查。其他 deadline 过期后，持久化的 unavailable/error 状态不再永久阻止恢复探测。探测失败时保留最后已知窗口，只写结构化脱敏错误。
 
@@ -2831,6 +2833,7 @@ collector 直接读取 DB 凭证，不接受 HMC 提交 URL。探测前会重新
     "observed_at": "2026-07-16T01:00:00Z",
     "credits": [
       {
+        "key": "1d4e58b2f3a4c5d6e7f809ab",
         "status": "available",
         "granted_at": "2026-07-15T01:00:00Z",
         "expires_at": "2026-07-27T07:40:51Z"
@@ -2853,11 +2856,48 @@ collector 直接读取 DB 凭证，不接受 HMC 提交 URL。探测前会重新
 }
 ```
 
-Provider 未报告该能力或没有可靠观测时，`reset_credits` 为 `null`。该字段只在详情响应中提供，不包含在 `GET /quota/credentials` 列表项里。`available_count` 是 Provider 最近一次报告的当前可用次数，`observed_at` 是该次 reset-credit 观测时间，`credits` 是经过数量限制并按过期时间排序的当前可用 Codex rate-limit reset credit 列表。usage 汇总提供正数次数、但独立详情请求失败时，`available_count` 保持本次最新值，`credits` 为空且 `collection_status=partial`；旧数量和已过期详情不会继续表现为当前数据。credit 条目只暴露状态和时间元数据，不返回 Provider 的 reset-credit 标识。该 endpoint 只读，不会消费 reset credit。
+Provider 未报告该能力或没有可靠观测时，`reset_credits` 为 `null`。该字段只在详情响应中提供，不包含在 `GET /quota/credentials` 列表项里。`available_count` 是 Provider 最近一次报告的当前可用次数，`observed_at` 是该次 reset-credit 观测时间，`credits` 是经过数量限制并按过期时间排序的当前可用 Codex rate-limit reset credit 列表。usage 汇总提供正数次数、但独立详情请求失败时，`available_count` 保持本次最新值，`credits` 为空且 `collection_status=partial`；旧数量和已过期详情不会继续表现为当前数据。每个 credit 还包含一个 24 字符的 `key`，它是稳定的单向摘要，可用于派生幂等请求 ID；Provider 原始 reset-credit 标识永不返回。该 endpoint 只读，不会消费 reset credit。
+
+### POST `/quota/credentials/:credential_id/reset-credits/consume`
+
+通过 Home 持有的凭证消费当前最早到期的 Codex reset credit。该接口会改变上游状态，仅在 `capabilities.quota_reset_credit_consume=true` 时可用；响应永远不会返回 Provider 原始 credit ID 或任何凭证材料。
+
+请求体：
+
+```json
+{
+  "redeem_request_id": "6885d7c5-c5d8-46d6-a37d-f0c52e49232e",
+  "expected_expires_at": "2026-08-01T03:03:09Z"
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `redeem_request_id` | UUID string | 必填幂等键。发生 timeout 或结果不明确的网络错误后，调用方必须复用完全相同的值。 |
+| `expected_expires_at` | RFC3339 timestamp | 必填乐观校验值，必须等于详情接口返回的当前最早可用 credit 到期时间。 |
+
+Home 仅接受已启用的 Codex OAuth/file credential，并要求 `active_probe` 或 `mixed` 来源的快照 fresh、完整、collector 版本为当前版本、可用次数为正，且最早 credit 尚未到期并匹配 `expected_expires_at`。如果更新的重采集先改变了最早 credit 或其到期时间，旧请求会在不调用上游消费接口的情况下被拒绝。自动化调用方在更新快照显示官方或人工回填额度后也必须停止调用；对于 Home 尚未采集到的上游重置，该接口无法提前预测。
+
+数据库中的单凭证 lease 会串行化多个 Home 实例。同一个已经成功的 `redeem_request_id` 会作为幂等重放直接返回，不会再次请求上游。一次尝试后，在写入更新的权威快照之前，不能换用另一个 request ID。上游返回 `401` 或 `403` 时，只会强制刷新一次凭证并重试一次。消费成功后，Home 立即将来源快照标记为 stale，并排队执行一次强制 Codex 重采集。
+
+响应 `200`：
+
+```json
+{
+  "status": "ok",
+  "credential_id": "auth-db-id",
+  "redeem_request_id": "6885d7c5-c5d8-46d6-a37d-f0c52e49232e",
+  "idempotent_replay": false,
+  "recollect_accepted": 1,
+  "recollect_running": true
+}
+```
+
+参数校验失败返回 `400`；凭证不存在或运行时未接入 consumer 返回 `404`；凭证禁用、快照 stale/不完整、到期时间已变化、credit 不可用、并发 claim，以及需要先写入更新快照的请求返回 `409`；上游失败返回 `502`；凭证刷新或完成状态持久化失败返回 `503`。`RESET_CREDIT_CONSUME_IN_PROGRESS` 还会返回 `Retry-After: 30`。所有错误使用额度接口统一 envelope，不包含上游响应 body、token 或 Provider credit ID。
 
 ### POST `/quota/collect`
 
-启动一轮异步按需额度采集，返回进入本地 collector 队列的凭证数量。这是唯一非只读的额度端点。按需任务与定时采集共享进程级 Provider 并发限制；同一凭证在本地排队或执行期间会去重。
+启动一轮异步按需额度采集，返回进入本地 collector 队列的凭证数量。按需任务与定时采集共享进程级 Provider 并发限制；同一凭证在本地排队或执行期间会去重。
 
 请求体(所有字段可选;空 body 采集全部符合条件的凭证):
 

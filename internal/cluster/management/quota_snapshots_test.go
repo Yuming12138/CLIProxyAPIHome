@@ -115,7 +115,8 @@ func TestQuotaManagementListAndDetailReadDatabaseSnapshots(t *testing.T) {
 		t.Fatalf("detail reset credit entries = %#v, want one", resetCredits["credits"])
 	}
 	credit, ok := credits[0].(map[string]any)
-	if !ok || credit["status"] != "available" || credit["granted_at"] != resetCreditGrantedAt.Format(time.RFC3339) || credit["expires_at"] != resetCreditExpiry.Format(time.RFC3339) {
+	creditKey, keyOK := credit["key"].(string)
+	if !ok || !keyOK || len(strings.TrimSpace(creditKey)) != 24 || credit["status"] != "available" || credit["granted_at"] != resetCreditGrantedAt.Format(time.RFC3339) || credit["expires_at"] != resetCreditExpiry.Format(time.RFC3339) {
 		t.Fatalf("detail reset credit = %#v, want read-only timing fields", credits[0])
 	}
 	if _, exists := credit["id"]; exists || strings.Contains(detailResponse.Body.String(), "reset-credit-1") {

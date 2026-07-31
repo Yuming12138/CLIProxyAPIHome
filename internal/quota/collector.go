@@ -21,27 +21,28 @@ import (
 )
 
 const (
-	defaultPollInterval        = time.Minute
-	defaultProbeTimeout        = 20 * time.Second
-	defaultProbeLeaseDuration  = time.Minute
-	defaultSnapshotFreshness   = 30 * time.Minute
-	defaultFailureBackoff      = 5 * time.Minute
-	maxFailureBackoff          = time.Hour
-	defaultProviderConcurrency = 3
-	maxProbeResponseBytes      = 1 << 20
-	codexUsageURL              = "https://chatgpt.com/backend-api/wham/usage"
-	codexResetCreditsURL       = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
-	claudeUsageURL             = "https://api.anthropic.com/api/oauth/usage"
-	claudeProfileURL           = "https://api.anthropic.com/api/oauth/profile"
-	kimiUsageURL               = "https://api.kimi.com/coding/v1/usages"
-	xaiBillingURL              = "https://cli-chat-proxy.grok.com/v1/billing"
-	codexUserAgent             = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
-	antigravityUserAgent       = "antigravity/1.11.5 windows/amd64"
-	xaiTokenAuthHeader         = "X-XAI-Token-Auth"
-	xaiTokenAuthValue          = "xai-grok-cli"
-	xaiClientVersionHeader     = "x-grok-client-version"
-	xaiClientVersionValue      = "0.2.93"
-	xaiGrokUserAgent           = "xai-grok-workspace/0.2.93"
+	defaultPollInterval         = time.Minute
+	defaultProbeTimeout         = 20 * time.Second
+	defaultProbeLeaseDuration   = time.Minute
+	defaultSnapshotFreshness    = 30 * time.Minute
+	defaultFailureBackoff       = 5 * time.Minute
+	maxFailureBackoff           = time.Hour
+	defaultProviderConcurrency  = 3
+	maxProbeResponseBytes       = 1 << 20
+	codexUsageURL               = "https://chatgpt.com/backend-api/wham/usage"
+	codexResetCreditsURL        = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+	codexResetCreditsConsumeURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+	claudeUsageURL              = "https://api.anthropic.com/api/oauth/usage"
+	claudeProfileURL            = "https://api.anthropic.com/api/oauth/profile"
+	kimiUsageURL                = "https://api.kimi.com/coding/v1/usages"
+	xaiBillingURL               = "https://cli-chat-proxy.grok.com/v1/billing"
+	codexUserAgent              = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
+	antigravityUserAgent        = "antigravity/1.11.5 windows/amd64"
+	xaiTokenAuthHeader          = "X-XAI-Token-Auth"
+	xaiTokenAuthValue           = "xai-grok-cli"
+	xaiClientVersionHeader      = "x-grok-client-version"
+	xaiClientVersionValue       = "0.2.93"
+	xaiGrokUserAgent            = "xai-grok-workspace/0.2.93"
 )
 
 var defaultAntigravityURLs = []string{
@@ -57,26 +58,28 @@ type SnapshotObservation struct {
 }
 
 type Options struct {
-	OnSnapshot             func(context.Context, *coreauth.Auth, SnapshotObservation)
-	Owner                  string
-	HomeID                 string
-	GlobalProxyURL         string
-	GlobalProxyURLProvider func() string
-	PollInterval           time.Duration
-	ProbeTimeout           time.Duration
-	LeaseDuration          time.Duration
-	SnapshotFreshness      time.Duration
-	ProviderConcurrency    int
-	CodexUsageURL          string
-	CodexResetCreditsURL   string
-	ClaudeUsageURL         string
-	ClaudeProfileURL       string
-	KimiUsageURL           string
-	XAIBillingURL          string
-	AntigravityURLs        []string
-	Now                    func() time.Time
-	HTTPClient             func(*coreauth.Auth, time.Duration) (*http.Client, error)
-	ResolveAuth            func(context.Context, *coreauth.Auth) (*coreauth.Auth, error)
+	OnSnapshot                  func(context.Context, *coreauth.Auth, SnapshotObservation)
+	Owner                       string
+	HomeID                      string
+	GlobalProxyURL              string
+	GlobalProxyURLProvider      func() string
+	PollInterval                time.Duration
+	ProbeTimeout                time.Duration
+	LeaseDuration               time.Duration
+	SnapshotFreshness           time.Duration
+	ProviderConcurrency         int
+	CodexUsageURL               string
+	CodexResetCreditsURL        string
+	CodexResetCreditsConsumeURL string
+	ClaudeUsageURL              string
+	ClaudeProfileURL            string
+	KimiUsageURL                string
+	XAIBillingURL               string
+	AntigravityURLs             []string
+	Now                         func() time.Time
+	HTTPClient                  func(*coreauth.Auth, time.Duration) (*http.Client, error)
+	ResolveAuth                 func(context.Context, *coreauth.Auth) (*coreauth.Auth, error)
+	ForceRefreshAuth            func(context.Context, *coreauth.Auth) (*coreauth.Auth, error)
 }
 
 type Collector struct {
@@ -120,6 +123,9 @@ func NewCollector(repo *cluster.Repository, options Options) *Collector {
 	}
 	if strings.TrimSpace(options.CodexResetCreditsURL) == "" {
 		options.CodexResetCreditsURL = codexResetCreditsURL
+	}
+	if strings.TrimSpace(options.CodexResetCreditsConsumeURL) == "" {
+		options.CodexResetCreditsConsumeURL = codexResetCreditsConsumeURL
 	}
 	if strings.TrimSpace(options.ClaudeUsageURL) == "" {
 		options.ClaudeUsageURL = claudeUsageURL
