@@ -221,9 +221,7 @@ func TestMarkRefreshPendingBlocksDispatchUntilRefreshCompletes(t *testing.T) {
 		NextRefreshAfter: now.Add(-time.Second),
 		NextRetryAfter:   now.Add(-time.Second),
 	}
-	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
-		t.Fatalf("Register() error = %v", errRegister)
-	}
+	registerDispatchTestAuth(t, manager, auth, "gpt-5")
 
 	if !manager.markRefreshPending(auth.ID, now) {
 		t.Fatal("markRefreshPending() = false, want true")
@@ -462,5 +460,110 @@ func TestApplyRefreshSuccessStatePreservesQuotaCooldown(t *testing.T) {
 	}
 	if !auth.Unavailable || auth.Status != StatusError || !auth.NextRetryAfter.Equal(quotaRetryAt) {
 		t.Fatalf("quota availability = unavailable %v status %v retry %v, want true/error/%v", auth.Unavailable, auth.Status, auth.NextRetryAfter, quotaRetryAt)
+	}
+}
+
+func TestMarkRefreshPendingKeepsValidAccessTokenDispatchable(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, nil, nil)
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:       "auth-refresh-valid-token",
+		Index:    "auth-refresh-valid-token",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "usable-access-token",
+			"expired":      now.Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	registerDispatchTestAuth(t, manager, auth, "gpt-5")
+
+	if !manager.markRefreshPending(auth.ID, now) {
+		t.Fatal("markRefreshPending() = false, want true")
+	}
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("pending auth not found")
+	}
+	if blocked, reason, next := isAuthBlockedForModel(updated, "gpt-5", now); blocked {
+		t.Fatalf("pending valid token blocked dispatch: reason=%v next=%v auth=%#v", reason, next, updated)
+	}
+	if !updated.NextRefreshAfter.After(now) || !updated.NextRetryAfter.IsZero() || updated.Unavailable {
+		t.Fatalf("pending valid token state = %#v, want refresh lease without dispatch backoff", updated)
+	}
+	decision, errDispatch := manager.Dispatch(context.Background(), []string{"codex"}, "gpt-5", Options{})
+	if errDispatch != nil || decision == nil {
+		t.Fatalf("Dispatch() = decision %#v error %v, want usable credential", decision, errDispatch)
+	}
+}
+
+func TestBackgroundRefreshFailureKeepsValidAccessTokenDispatchable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:               "auth-background-refresh-valid-token",
+		Provider:         "codex",
+		Status:           StatusError,
+		StatusMessage:    refreshTransientErrorMsg,
+		Unavailable:      true,
+		NextRefreshAfter: now.Add(-time.Second),
+		NextRetryAfter:   now.Add(time.Minute),
+		LastError:        &Error{Code: refreshTransientErrorCode, Message: refreshTransientErrorMsg, Retryable: true},
+		Metadata: map[string]any{
+			"access_token": "usable-access-token",
+			"expired":      now.Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	ApplyBackgroundRefreshFailureState(auth, errors.New("temporary refresh outage"), now)
+
+	if auth.Unavailable || auth.Status != StatusActive || !auth.NextRetryAfter.IsZero() || auth.LastError != nil {
+		t.Fatalf("background refresh failure blocked valid token: %#v", auth)
+	}
+	if !auth.NextRefreshAfter.Equal(now.Add(refreshFailureBackoff)) {
+		t.Fatalf("NextRefreshAfter = %v, want %v", auth.NextRefreshAfter, now.Add(refreshFailureBackoff))
+	}
+}
+
+func TestBackgroundRefreshFailureBlocksExpiredAccessToken(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:       "auth-background-refresh-expired-token",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "expired-access-token",
+			"expired":      now.Add(-time.Minute).Format(time.RFC3339),
+		},
+	}
+
+	ApplyBackgroundRefreshFailureState(auth, errors.New("temporary refresh outage"), now)
+
+	if !auth.Unavailable || auth.Status != StatusError || !auth.NextRetryAfter.After(now) || auth.LastError == nil {
+		t.Fatalf("expired token refresh failure state = %#v, want dispatch-blocking backoff", auth)
+	}
+}
+
+func TestApplyRefreshSuccessStateClearsOrphanedUnavailableRetry(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:             "auth-orphaned-unavailable",
+		Provider:       "codex",
+		Status:         StatusActive,
+		Unavailable:    true,
+		NextRetryAfter: now.Add(time.Minute),
+	}
+
+	ApplyRefreshSuccessState(auth, now)
+
+	if auth.Unavailable || auth.Status != StatusActive || !auth.NextRetryAfter.IsZero() {
+		t.Fatalf("orphaned state after refresh success = %#v, want active dispatchable", auth)
 	}
 }

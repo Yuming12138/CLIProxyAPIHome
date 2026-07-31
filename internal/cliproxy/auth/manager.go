@@ -1102,6 +1102,32 @@ func authRefreshDisabled(auth *Auth) bool {
 	return auth == nil || auth.Disabled || auth.Status == StatusDisabled
 }
 
+// RefreshRetryBackoffOpen reports whether another refresh attempt should wait.
+// Refresh scheduling is intentionally independent from dispatch availability:
+// a still-valid access token may continue serving requests during this window.
+func RefreshRetryBackoffOpen(auth *Auth, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return auth.NextRefreshAfter.After(now)
+}
+
+func accessTokenUsableAt(auth *Auth, now time.Time) bool {
+	if auth == nil || authRefreshDisabled(auth) || isUnauthorizedAuthState(auth) {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if expiry, ok := auth.ExpirationTime(); ok && !expiry.IsZero() {
+		return expiry.After(now)
+	}
+	return accessTokenForFingerprint(auth) != ""
+}
+
 // RefreshBackoffOpen reports whether a transient refresh cooldown is active.
 func RefreshBackoffOpen(auth *Auth, now time.Time) bool {
 	if auth == nil || !auth.Unavailable || !auth.NextRetryAfter.After(now) {
@@ -1151,7 +1177,63 @@ func ApplyUnsupportedRefreshBackoff(auth *Auth, now time.Time) {
 	auth.UpdatedAt = now
 }
 
-// ApplyRefreshPendingState blocks dispatch while a refresh request is in flight.
+func clearRefreshDispatchState(auth *Auth, now time.Time) {
+	if auth == nil || (!isTransientRefreshState(auth) && !isOrphanedUnavailableState(auth, now)) {
+		return
+	}
+	authQuota := auth.Quota
+	preserveAuthQuota := authQuota.Exceeded && authQuota.NextRecoverAt.After(now) && (authCooldownScope(auth) == cooldownScopeAuth || (authCooldownScope(auth) == "" && !quotaAggregatedFromModel(authQuota, auth.ModelStates)))
+	auth.Unavailable = false
+	auth.NextRetryAfter = time.Time{}
+	auth.LastError = nil
+	auth.StatusMessage = ""
+	recomputeAggregatedAvailability(auth, now)
+	if preserveAuthQuota {
+		auth.Quota = authQuota
+		auth.Unavailable = true
+		auth.Status = StatusError
+		setAuthCooldownScope(auth, cooldownScopeAuth)
+		if auth.NextRetryAfter.Before(authQuota.NextRecoverAt) {
+			auth.NextRetryAfter = authQuota.NextRecoverAt
+		}
+		return
+	}
+	if hasModelError(auth, now) {
+		auth.Status = StatusError
+	} else {
+		auth.Status = StatusActive
+	}
+}
+
+func normalizeRefreshRetryAt(now, retryAt time.Time) time.Time {
+	if retryAt.IsZero() || !retryAt.After(now) {
+		return now.Add(refreshPendingBackoff)
+	}
+	return retryAt.UTC()
+}
+
+// ApplyRefreshLeaseState records an in-flight background refresh lease. Dispatch
+// is blocked only when the existing access token is already unusable.
+func ApplyRefreshLeaseState(auth *Auth, now, retryAt time.Time) {
+	if auth == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	now = now.UTC()
+	retryAt = normalizeRefreshRetryAt(now, retryAt)
+	auth.NextRefreshAfter = retryAt
+	if accessTokenUsableAt(auth, now) {
+		clearRefreshDispatchState(auth, now)
+		auth.UpdatedAt = now
+		return
+	}
+	ApplyRefreshPendingState(auth, now, retryAt)
+}
+
+// ApplyRefreshPendingState blocks dispatch while a request-triggered refresh or
+// expired-token refresh is in flight.
 func ApplyRefreshPendingState(auth *Auth, now, retryAt time.Time) {
 	if auth == nil {
 		return
@@ -1160,11 +1242,7 @@ func ApplyRefreshPendingState(auth *Auth, now, retryAt time.Time) {
 		now = time.Now().UTC()
 	}
 	now = now.UTC()
-	if retryAt.IsZero() || !retryAt.After(now) {
-		retryAt = now.Add(refreshPendingBackoff)
-	} else {
-		retryAt = retryAt.UTC()
-	}
+	retryAt = normalizeRefreshRetryAt(now, retryAt)
 	auth.Unavailable = true
 	auth.Status = StatusError
 	auth.StatusMessage = refreshTransientErrorMsg
@@ -1180,17 +1258,39 @@ func ApplyRefreshPendingState(auth *Auth, now, retryAt time.Time) {
 	auth.UpdatedAt = now
 }
 
-// applyRefreshFailureState records refresh failures and permanently disables
-// credentials only when the refresh token is explicitly known to be terminal.
+// ApplyRefreshFailureState records request-triggered refresh failures and
+// permanently disables credentials only when the refresh token is explicitly
+// known to be terminal.
+func ApplyRefreshFailureState(auth *Auth, errRefresh error, now time.Time) {
+	applyRefreshFailureStateWithDispatch(auth, errRefresh, now, false)
+}
+
+// ApplyBackgroundRefreshFailureState records background refresh failures without
+// blocking dispatch while the current access token remains usable.
+func ApplyBackgroundRefreshFailureState(auth *Auth, errRefresh error, now time.Time) {
+	applyRefreshFailureStateWithDispatch(auth, errRefresh, now, true)
+}
+
 func applyRefreshFailureState(auth *Auth, errRefresh error, now time.Time) {
+	ApplyRefreshFailureState(auth, errRefresh, now)
+}
+
+func applyRefreshFailureStateWithDispatch(auth *Auth, errRefresh error, now time.Time, keepUsableTokenDispatchable bool) {
 	if auth == nil || errRefresh == nil {
 		return
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	now = now.UTC()
 	if isTerminalRefreshAuthError(errRefresh) {
 		disableAuthAfterUnauthorized(auth, nil, newUnauthorizedRefreshError(), now)
+		return
+	}
+	if keepUsableTokenDispatchable && accessTokenUsableAt(auth, now) {
+		clearRefreshDispatchState(auth, now)
+		auth.NextRefreshAfter = now.Add(refreshFailureBackoff)
+		auth.UpdatedAt = now
 		return
 	}
 	ApplyRefreshPendingState(auth, now, now.Add(refreshFailureBackoff))
@@ -1246,7 +1346,7 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 		m.mu.Unlock()
 		return false
 	}
-	ApplyRefreshPendingState(auth, now, now.Add(refreshPendingBackoff))
+	ApplyRefreshLeaseState(auth, now, now.Add(refreshPendingBackoff))
 	m.auths[id] = auth
 	snapshot := auth.Clone()
 	m.mu.Unlock()
@@ -1790,7 +1890,7 @@ func (m *Manager) refreshAuth(ctx context.Context, authID string) {
 			logEntryWithRequestID(ctx).Warnf("auth refresh failed | auth=%s provider=%s err=%s", authID, current.Provider, refreshTransientErrorMsg)
 		}
 		snapshot := current.Clone()
-		applyRefreshFailureState(snapshot, errRefresh, now)
+		ApplyBackgroundRefreshFailureState(snapshot, errRefresh, now)
 		if _, errUpdate := m.Update(ctx, snapshot); errUpdate != nil {
 			logEntryWithRequestID(ctx).Warnf("auth refresh failure state update failed | auth=%s provider=%s err=%v", authID, current.Provider, errUpdate)
 		}
@@ -1824,7 +1924,7 @@ func ApplyRefreshSuccessState(auth *Auth, now time.Time) []string {
 	wasDisabled := auth.Disabled || auth.Status == StatusDisabled
 	authQuota := auth.Quota
 	preserveAuthQuota := authQuota.Exceeded && authQuota.NextRecoverAt.After(now) && (authCooldownScope(auth) == cooldownScopeAuth || (authCooldownScope(auth) == "" && !quotaAggregatedFromModel(authQuota, auth.ModelStates)))
-	clearAuthFailure := isTransientRefreshState(auth) || isUnauthorizedAuthState(auth)
+	clearAuthFailure := isTransientRefreshState(auth) || isUnauthorizedAuthState(auth) || isOrphanedUnavailableState(auth, now)
 	auth.LastRefreshedAt = now
 	auth.NextRefreshAfter = time.Time{}
 	auth.UpdatedAt = now
@@ -1905,6 +2005,22 @@ func isTransientRefreshState(auth *Auth) bool {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(auth.StatusMessage), refreshTransientErrorMsg)
+}
+
+// isOrphanedUnavailableState identifies an internally inconsistent aggregate
+// state that can remain when a concurrent success clears refresh diagnostics
+// but leaves the old refresh retry deadline behind.
+func isOrphanedUnavailableState(auth *Auth, now time.Time) bool {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled || !auth.Unavailable || auth.Quota.Exceeded {
+		return false
+	}
+	if auth.LastError != nil || strings.TrimSpace(auth.StatusMessage) != "" {
+		return false
+	}
+	if hasModelError(auth, now) || authUnavailableAggregatedFromModels(auth, now) {
+		return false
+	}
+	return true
 }
 
 func isUnauthorizedAuthState(auth *Auth) bool {

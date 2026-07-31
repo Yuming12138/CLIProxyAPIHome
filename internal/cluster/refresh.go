@@ -73,7 +73,7 @@ func NewRefreshController(coordinator *Coordinator, runtime *home.Runtime, repo 
 			if authIndex == "" {
 				authIndex = strings.TrimSpace(auth.ID)
 			}
-			_, errRefresh := controller.refreshLocalWithLock(ctx, authIndex, auth.LastRefreshedAt, coreauth.AccessTokenSHA256(auth))
+			_, errRefresh := controller.refreshLocalWithLock(ctx, authIndex, auth.LastRefreshedAt, coreauth.AccessTokenSHA256(auth), true)
 			return errRefresh
 		})
 	}
@@ -124,7 +124,7 @@ func (c *RefreshController) RefreshNowObserved(ctx context.Context, authIndex st
 		return nil, fmt.Errorf("cluster refresh master lookup: %w", errMaster)
 	}
 	if c.isSelf(master) {
-		return c.refreshLocalWithLock(ctx, authIndex, observedRefreshAt, observedAccessTokenSHA256)
+		return c.refreshLocalWithLock(ctx, authIndex, observedRefreshAt, observedAccessTokenSHA256, false)
 	}
 
 	forwardAuthUUID := strings.TrimSpace(authIndex)
@@ -242,7 +242,7 @@ func (c *RefreshController) isSelf(node *ClusterNodeRecord) bool {
 
 // refreshLocalWithLock claims a short database lease, performs OAuth outside
 // the transaction, then applies the result only if the lease is still owned.
-func (c *RefreshController) refreshLocalWithLock(ctx context.Context, authIndex string, observedRefreshAt time.Time, observedAccessTokenSHA256 string) ([]byte, error) {
+func (c *RefreshController) refreshLocalWithLock(ctx context.Context, authIndex string, observedRefreshAt time.Time, observedAccessTokenSHA256 string, background bool) ([]byte, error) {
 	if c == nil || c.runtime == nil || c.repo == nil {
 		return nil, fmt.Errorf("cluster refresh: controller is not ready")
 	}
@@ -277,7 +277,7 @@ func (c *RefreshController) refreshLocalWithLock(ctx context.Context, authIndex 
 			skipRefresh = true
 			return false
 		}
-		if coreauth.RefreshBackoffOpen(auth, now) || refreshLeaseActive(auth, now) {
+		if refreshLeaseActive(auth, now) || (!background && coreauth.RefreshBackoffOpen(auth, now)) || (background && coreauth.RefreshRetryBackoffOpen(auth, now)) {
 			refreshErr = coreauth.NewTransientRefreshError()
 			skipRefresh = true
 			return false
@@ -287,7 +287,11 @@ func (c *RefreshController) refreshLocalWithLock(ctx context.Context, authIndex 
 			auth.Attributes = make(map[string]string)
 		}
 		auth.Attributes[refreshLeaseAttribute] = leaseID
-		coreauth.ApplyRefreshPendingState(auth, now, now.Add(refreshLeaseDuration))
+		if background {
+			coreauth.ApplyRefreshLeaseState(auth, now, now.Add(refreshLeaseDuration))
+		} else {
+			coreauth.ApplyRefreshPendingState(auth, now, now.Add(refreshLeaseDuration))
+		}
 		return true
 	})
 	if errClaim != nil {
@@ -336,7 +340,7 @@ func (c *RefreshController) refreshLocalWithLock(ctx context.Context, authIndex 
 					coreauth.ApplyUnsupportedRefreshBackoff(current, time.Now().UTC())
 					return true
 				}
-				merged := mergeClusterRefreshOutcome(current, leased, refreshed, errRefresh, time.Now().UTC())
+				merged := mergeClusterRefreshOutcome(current, leased, refreshed, errRefresh, time.Now().UTC(), background)
 				if merged.Attributes != nil {
 					delete(merged.Attributes, refreshLeaseAttribute)
 				}
@@ -358,7 +362,7 @@ func (c *RefreshController) refreshLocalWithLock(ctx context.Context, authIndex 
 		}
 		cancelFinalize()
 		if errFinalize != nil {
-			go c.continueRefreshFinalize(targetUUID, leaseID, leased.Clone(), beforeClaim.Clone(), refreshed.Clone(), errRefresh, now.Add(refreshLeaseDuration))
+			go c.continueRefreshFinalize(targetUUID, leaseID, leased.Clone(), beforeClaim.Clone(), refreshed.Clone(), errRefresh, now.Add(refreshLeaseDuration), background)
 			return nil, errFinalize
 		}
 		updated = finalized
@@ -403,7 +407,7 @@ func (c *RefreshController) refreshLocalWithLock(ctx context.Context, authIndex 
 	return home.BuildRefreshPayload(updated)
 }
 
-func (c *RefreshController) continueRefreshFinalize(targetUUID, leaseID string, leased, beforeClaim, refreshed *coreauth.Auth, errRefresh error, deadline time.Time) {
+func (c *RefreshController) continueRefreshFinalize(targetUUID, leaseID string, leased, beforeClaim, refreshed *coreauth.Auth, errRefresh error, deadline time.Time, background bool) {
 	if c == nil || c.repo == nil || c.runtime == nil || leased == nil || refreshed == nil {
 		return
 	}
@@ -432,7 +436,7 @@ func (c *RefreshController) continueRefreshFinalize(targetUUID, leaseID string, 
 				coreauth.ApplyUnsupportedRefreshBackoff(current, time.Now().UTC())
 				return true
 			}
-			merged := mergeClusterRefreshOutcome(current, leased, refreshed, errRefresh, time.Now().UTC())
+			merged := mergeClusterRefreshOutcome(current, leased, refreshed, errRefresh, time.Now().UTC(), background)
 			if merged.Attributes != nil {
 				delete(merged.Attributes, refreshLeaseAttribute)
 			}
@@ -481,7 +485,7 @@ func refreshLeaseActive(auth *coreauth.Auth, now time.Time) bool {
 	return auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes[refreshLeaseAttribute]) != "" && auth.NextRefreshAfter.After(now)
 }
 
-func mergeClusterRefreshOutcome(current, base, refreshed *coreauth.Auth, errRefresh error, now time.Time) *coreauth.Auth {
+func mergeClusterRefreshOutcome(current, base, refreshed *coreauth.Auth, errRefresh error, now time.Time, background bool) *coreauth.Auth {
 	if current == nil {
 		return refreshed
 	}
@@ -507,15 +511,11 @@ func mergeClusterRefreshOutcome(current, base, refreshed *coreauth.Auth, errRefr
 		}
 		return merged
 	}
-	merged.Disabled = refreshed.Disabled
-	merged.Unavailable = refreshed.Unavailable
-	merged.Status = refreshed.Status
-	merged.StatusMessage = refreshed.StatusMessage
-	merged.LastError = refreshed.LastError
-	merged.LastRefreshedAt = refreshed.LastRefreshedAt
-	merged.NextRefreshAfter = refreshed.NextRefreshAfter
-	merged.NextRetryAfter = refreshed.NextRetryAfter
-	merged.UpdatedAt = refreshed.UpdatedAt
+	if background {
+		coreauth.ApplyBackgroundRefreshFailureState(merged, errRefresh, now)
+	} else {
+		coreauth.ApplyRefreshFailureState(merged, errRefresh, now)
+	}
 	return merged
 }
 

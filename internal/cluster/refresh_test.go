@@ -17,6 +17,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPIHome/internal/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPIHome/internal/config"
 	"github.com/router-for-me/CLIProxyAPIHome/internal/home"
+	"github.com/router-for-me/CLIProxyAPIHome/internal/registry"
 )
 
 func markRefreshTestMaster(t *testing.T, repo *Repository, coordinator *Coordinator) {
@@ -137,6 +138,18 @@ func newRefreshTestRuntime(t *testing.T, repo *Repository, auth *coreauth.Auth, 
 	}
 	t.Cleanup(runtime.Stop)
 	return runtime
+}
+
+func registerRefreshTestModel(t *testing.T, authID, provider string, models ...string) {
+	t.Helper()
+	infos := make([]*registry.ModelInfo, 0, len(models))
+	for _, model := range models {
+		infos = append(infos, &registry.ModelInfo{ID: model, Object: "model", OwnedBy: provider, Type: provider})
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, provider, infos)
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authID)
+	})
 }
 
 func newInvalidGrantRefreshAuth(id string) *coreauth.Auth {
@@ -385,6 +398,101 @@ func TestRefreshControllerBlocksDispatchWhileProviderRefreshIsInFlight(t *testin
 	}
 }
 
+func TestRefreshControllerBackgroundRefreshKeepsValidTokenDispatchableWhileInFlight(t *testing.T) {
+	const authID = "antigravity-background-refresh-in-flight"
+	ctx := context.Background()
+	repo := newRefreshTestRepository(t)
+	auth := newInvalidGrantRefreshAuth(authID)
+	auth.Metadata["expired"] = time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	if _, errUpsert := repo.UpsertAuth(ctx, auth, "register"); errUpsert != nil {
+		t.Fatalf("UpsertAuth() error = %v", errUpsert)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	transport := &refreshTestRoundTripper{
+		statusCode: http.StatusOK,
+		body:       `{"access_token":"fresh-access-token","expires_in":3600}`,
+		hook: func() {
+			close(started)
+			<-release
+		},
+	}
+	registerRefreshTestModel(t, authID, auth.Provider, "model-a")
+	runtime := newRefreshTestRuntime(t, repo, auth, transport)
+	coordinator := NewCoordinator(repo, NodeIdentity{IP: "127.0.0.1", Port: 9315, Secret: "master-secret"}, CoordinatorOptions{})
+	markRefreshTestMaster(t, repo, coordinator)
+	controller := NewRefreshController(coordinator, runtime, repo, nil)
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, errRefresh := controller.refreshLocalWithLock(ctx, authID, auth.LastRefreshedAt, coreauth.AccessTokenSHA256(auth), true)
+		refreshDone <- errRefresh
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("refresh did not start")
+	}
+
+	inMemory, ok := runtime.CoreManager().GetByID(authID)
+	if !ok || inMemory == nil {
+		close(release)
+		<-refreshDone
+		t.Fatal("GetByID() did not find auth")
+	}
+	if coreauth.RefreshBackoffOpen(inMemory, time.Now().UTC()) || inMemory.Unavailable || !inMemory.NextRefreshAfter.After(time.Now().UTC()) {
+		close(release)
+		<-refreshDone
+		t.Fatalf("in-flight background refresh state = %#v, want refresh lease without dispatch backoff", inMemory)
+	}
+	decision, errDispatch := runtime.CoreManager().Dispatch(ctx, []string{"antigravity"}, "model-a", coreauth.Options{})
+	if errDispatch != nil || decision == nil {
+		close(release)
+		<-refreshDone
+		t.Fatalf("Dispatch() = decision %#v error %v, want valid token dispatchable", decision, errDispatch)
+	}
+
+	close(release)
+	if errRefresh := <-refreshDone; errRefresh != nil {
+		t.Fatalf("background refresh error = %v", errRefresh)
+	}
+}
+
+func TestRefreshControllerBackgroundRefreshFailureKeepsValidTokenDispatchable(t *testing.T) {
+	const authID = "antigravity-background-refresh-failure"
+	ctx := context.Background()
+	repo := newRefreshTestRepository(t)
+	auth := newInvalidGrantRefreshAuth(authID)
+	auth.Metadata["expired"] = time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	if _, errUpsert := repo.UpsertAuth(ctx, auth, "register"); errUpsert != nil {
+		t.Fatalf("UpsertAuth() error = %v", errUpsert)
+	}
+
+	transport := &refreshTestRoundTripper{body: `{"error":"temporary","detail":"upstream-secret"}`}
+	runtime := newRefreshTestRuntime(t, repo, auth, transport)
+	coordinator := NewCoordinator(repo, NodeIdentity{IP: "127.0.0.1", Port: 9316, Secret: "master-secret"}, CoordinatorOptions{})
+	markRefreshTestMaster(t, repo, coordinator)
+	controller := NewRefreshController(coordinator, runtime, repo, nil)
+
+	_, errRefresh := controller.refreshLocalWithLock(ctx, authID, auth.LastRefreshedAt, coreauth.AccessTokenSHA256(auth), true)
+	if errRefresh == nil {
+		t.Fatal("background refresh error = nil, want transient refresh error")
+	}
+	if strings.Contains(errRefresh.Error(), "upstream-secret") {
+		t.Fatalf("background refresh error leaked provider response: %v", errRefresh)
+	}
+
+	persisted, _, errAuth := repo.GetAuth(ctx, authID)
+	if errAuth != nil {
+		t.Fatalf("GetAuth() error = %v", errAuth)
+	}
+	if persisted.Unavailable || !persisted.NextRetryAfter.IsZero() || !persisted.NextRefreshAfter.After(time.Now().UTC()) {
+		t.Fatalf("background refresh failure state = %#v, want refresh retry only", persisted)
+	}
+}
+
 func TestRefreshControllerDoesNotRetryCredentialDisabledDuringOAuth(t *testing.T) {
 	const authID = "antigravity-disabled-during-refresh"
 	ctx := context.Background()
@@ -534,7 +642,7 @@ func TestMergeClusterRefreshOutcomePreservesIneffectiveBackoff(t *testing.T) {
 	refreshed.Metadata["access_token"] = "same-access-token"
 	refreshed.NextRefreshAfter = now.Add(30 * time.Second)
 
-	merged := mergeClusterRefreshOutcome(current, base, refreshed, nil, now)
+	merged := mergeClusterRefreshOutcome(current, base, refreshed, nil, now, false)
 	if merged == nil || !merged.NextRefreshAfter.Equal(refreshed.NextRefreshAfter) {
 		t.Fatalf("merged NextRefreshAfter = %v, want %v", merged.NextRefreshAfter, refreshed.NextRefreshAfter)
 	}
