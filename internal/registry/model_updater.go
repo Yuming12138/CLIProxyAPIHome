@@ -20,6 +20,7 @@ const (
 )
 
 var modelsURLs = []string{
+	"https://raw.githubusercontent.com/Yuming12138/newapi-cmsg/refs/heads/dev/cmsg/cliproxyapi/internal/registry/models/models.json",
 	"https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json",
 	"https://models.router-for.me/models.json",
 }
