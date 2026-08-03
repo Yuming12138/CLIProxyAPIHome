@@ -731,6 +731,46 @@ func TestForceClaimEligibleQuotaProbeBypassesFreshnessButNotLease(t *testing.T) 
 	}
 }
 
+func TestForceClaimEligibleQuotaProbeRechecksQuotaCooldownButProtectsRefreshBackoff(t *testing.T) {
+	ctx := context.Background()
+	repo, closeRepo := newBillingTestRepository(t, ctx)
+	defer closeRepo()
+	now := time.Date(2026, 8, 3, 18, 0, 0, 0, time.UTC)
+	recoverAt := now.Add(24 * time.Hour)
+
+	tests := []struct {
+		name          string
+		statusMessage string
+		quotaExceeded bool
+		wantClaimed   bool
+	}{
+		{name: "quota cooldown", quotaExceeded: true, wantClaimed: true},
+		{name: "quota plus refresh backoff", statusMessage: "credential refresh temporarily unavailable", quotaExceeded: true, wantClaimed: false},
+		{name: "non quota cooldown", wantClaimed: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			credentialID := "claim-" + strings.ReplaceAll(test.name, " ", "-")
+			auth := &coreauth.Auth{
+				ID: credentialID, Index: credentialID, Provider: "codex", Label: test.name,
+				Status: coreauth.StatusError, StatusMessage: test.statusMessage, Unavailable: true,
+				NextRetryAfter: recoverAt, Metadata: map[string]any{"type": "codex"}, CreatedAt: now, UpdatedAt: now,
+			}
+			if test.quotaExceeded {
+				auth.Quota = coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: recoverAt}
+			}
+			if _, errUpsert := repo.UpsertAuth(ctx, auth, "test"); errUpsert != nil {
+				t.Fatalf("UpsertAuth() error = %v", errUpsert)
+			}
+
+			claimed, errClaim := repo.ForceClaimEligibleQuotaProbe(ctx, credentialID, "home-a", now, time.Minute)
+			if errClaim != nil || claimed != test.wantClaimed {
+				t.Fatalf("ForceClaimEligibleQuotaProbe() = %v, %v, want %v, nil", claimed, errClaim, test.wantClaimed)
+			}
+		})
+	}
+}
+
 func TestCodexLegacySnapshotUpgradeForcesOneProbeAndHonorsBackoff(t *testing.T) {
 	ctx := context.Background()
 	repo, closeRepo := newBillingTestRepository(t, ctx)

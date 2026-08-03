@@ -630,7 +630,7 @@ func (r *Repository) claimQuotaProbe(ctx context.Context, credentialID string, o
 			}
 			provider := normalizeQuotaProviderID(authRecord.Provider)
 			credentialType := quotaCredentialType(auth)
-			if !quotaCredentialCollectorPlanned(provider, credentialType) || authRecord.Disabled || authRecord.Status == coreauth.StatusDisabled || authRecord.NextRetryAfter != nil && authRecord.NextRetryAfter.After(now) {
+			if !quotaCredentialCollectorPlanned(provider, credentialType) || authRecord.Disabled || authRecord.Status == coreauth.StatusDisabled || quotaCredentialRetryBlocksProbe(auth, now) {
 				return nil
 			}
 			targetCollectorVersion = QuotaSnapshotVersion(provider)
@@ -706,6 +706,19 @@ func (r *Repository) claimQuotaProbe(ctx context.Context, credentialID string, o
 		return nil
 	})
 	return claimed, errTransaction
+}
+
+// quotaCredentialRetryBlocksProbe keeps transient credential refresh failures
+// protected while allowing the authoritative collector to detect an early
+// quota reset before the dispatch cooldown expires.
+func quotaCredentialRetryBlocksProbe(auth *coreauth.Auth, now time.Time) bool {
+	if auth == nil || !auth.NextRetryAfter.After(now) {
+		return false
+	}
+	if coreauth.RefreshBackoffOpen(auth, now) {
+		return true
+	}
+	return !auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.After(now)
 }
 
 func (r *Repository) FailQuotaProbe(ctx context.Context, credentialID string, owner string, failure QuotaCollectionError, nextProbeAt time.Time) error {
