@@ -32,6 +32,9 @@ func TestRecordQuotaObservationAppliesAccountExhaustedCooldown(t *testing.T) {
 	if updated.LastError == nil || updated.LastError.HTTPStatus != http.StatusTooManyRequests {
 		t.Fatalf("LastError = %+v, want HTTP 429", updated.LastError)
 	}
+	if updated.Success != 0 || updated.Failed != 0 {
+		t.Fatalf("quota observation request counters = success %d failed %d, want zero", updated.Success, updated.Failed)
+	}
 	wantMin := before.Add(cooldown - 2*time.Second)
 	wantMax := before.Add(cooldown + 2*time.Second)
 	if updated.NextRetryAfter.Before(wantMin) || updated.NextRetryAfter.After(wantMax) {
@@ -57,6 +60,91 @@ func TestRecordQuotaObservationClearsCooldownAfterHealthyOrLowSnapshot(t *testin
 	}
 	if updated.Unavailable || updated.Quota.Exceeded || !updated.NextRetryAfter.IsZero() || updated.Status != coreauth.StatusActive {
 		t.Fatalf("low snapshot did not clear quota cooldown: %+v", updated)
+	}
+	if updated.Success != 0 || updated.Failed != 0 {
+		t.Fatalf("quota recovery request counters = success %d failed %d, want zero", updated.Success, updated.Failed)
+	}
+}
+
+func TestRecordQuotaObservationClearsOnlyQuotaModelStates(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{ID: "codex-model-recovery", Index: "codex-model-recovery", Provider: "codex", Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	quotaModel := "gpt-quota"
+	forbiddenModel := "gpt-forbidden"
+
+	cooldown := time.Hour
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: quotaModel,
+		Error:      &coreauth.Error{Code: "quota_exhausted", Message: "quota exhausted", Retryable: true, HTTPStatus: http.StatusTooManyRequests},
+		RetryAfter: &cooldown,
+	})
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: forbiddenModel,
+		Error: &coreauth.Error{Code: "permission_denied", Message: "permission denied", HTTPStatus: http.StatusForbidden},
+	})
+
+	rt := &Runtime{coreManager: manager}
+	rt.RecordQuotaObservation(context.Background(), auth, "healthy", nil)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("updated credential missing")
+	}
+	quotaState := updated.ModelStates[quotaModel]
+	if quotaState == nil || quotaState.Status != coreauth.StatusActive || quotaState.Unavailable || quotaState.Quota.Exceeded || quotaState.LastError != nil {
+		t.Fatalf("quota model state was not recovered: %+v", quotaState)
+	}
+	forbiddenState := updated.ModelStates[forbiddenModel]
+	if forbiddenState == nil || forbiddenState.Status != coreauth.StatusError || !forbiddenState.Unavailable || forbiddenState.LastError == nil || forbiddenState.LastError.HTTPStatus != http.StatusForbidden {
+		t.Fatalf("non-quota model state was changed: %+v", forbiddenState)
+	}
+	if updated.Unavailable {
+		t.Fatalf("credential remained unavailable after one model recovered: %+v", updated)
+	}
+}
+
+func TestRecordQuotaObservationDoesNotClearDisabledOrUnauthorizedState(t *testing.T) {
+	tests := []struct {
+		name string
+		auth *coreauth.Auth
+	}{
+		{
+			name: "disabled",
+			auth: &coreauth.Auth{
+				ID: "codex-disabled", Index: "codex-disabled", Provider: "codex", Disabled: true, Status: coreauth.StatusDisabled,
+				StatusMessage: "unauthorized", Unavailable: true,
+				Quota: coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: time.Now().Add(time.Hour)},
+			},
+		},
+		{
+			name: "unauthorized",
+			auth: &coreauth.Auth{
+				ID: "codex-unauthorized", Index: "codex-unauthorized", Provider: "codex", Status: coreauth.StatusError,
+				StatusMessage: "unauthorized", Unavailable: true, NextRetryAfter: time.Now().Add(time.Hour),
+				Quota:     coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: time.Now().Add(time.Hour)},
+				LastError: &coreauth.Error{Code: "authentication_error", Message: "credential unauthorized", HTTPStatus: http.StatusUnauthorized},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := coreauth.NewManager(nil, nil, nil)
+			if _, errRegister := manager.Register(context.Background(), test.auth); errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			rt := &Runtime{coreManager: manager}
+			rt.RecordQuotaObservation(context.Background(), test.auth, "healthy", nil)
+			updated, ok := manager.GetByID(test.auth.ID)
+			if !ok || updated == nil {
+				t.Fatal("updated credential missing")
+			}
+			if !updated.Quota.Exceeded || !updated.Unavailable || updated.Status == coreauth.StatusActive {
+				t.Fatalf("protected auth state was cleared: %+v", updated)
+			}
+		})
 	}
 }
 

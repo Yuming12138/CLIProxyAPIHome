@@ -2579,6 +2579,8 @@ Token 替换更严格：只要任意 header 包含 `$TOKEN$`，`auth_index` 就�
 2. 全局 `proxy-url`。
 3. 禁用环境代理的直连 transport。
 
+为兼容旧版管理面板，当 Codex credential 通过该接口成功 `GET` 精确的官方目标 `https://chatgpt.com/backend-api/wham/usage` 时，Home 还会为该 credential 排队一次权威额度重采集。Home 不会直接信任通用代理返回的响应体来修改调度状态；只有后续 collector 结果才能清除 quota 导致的账号级和模型级 cooldown。disabled credential、认证失败和非 quota 模型错误都会保留。
+
 输出示例：
 
 ```json

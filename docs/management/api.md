@@ -2580,6 +2580,8 @@ Proxy priority:
 2. Global `proxy-url`.
 3. Direct transport with environment proxy disabled.
 
+For compatibility with legacy management panels, a successful Codex `GET` to the exact official `https://chatgpt.com/backend-api/wham/usage` target also queues an authoritative Home quota recollection for that credential. Home does not trust the generic proxy response body to mutate scheduler state; only the follow-up collector result can clear quota-derived account and model cooldowns. Disabled credentials, authentication failures, and non-quota model errors are preserved.
+
 Example response:
 
 ```json

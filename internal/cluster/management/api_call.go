@@ -141,12 +141,45 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
 	}
+	h.maybeTriggerCodexQuotaRecollect(ctx, method, parsedURL, resp.StatusCode, auth)
 
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+// maybeTriggerCodexQuotaRecollect bridges the legacy management panel's
+// generic WHAM usage refresh to Home's authoritative quota collector.
+func (h *Handler) maybeTriggerCodexQuotaRecollect(ctx context.Context, method string, parsedURL *url.URL, statusCode int, auth *coreauth.Auth) {
+	if h == nil || h.quotaRecollect == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	if !apiCallIsCodexQuotaUsage(method, parsedURL, statusCode, auth) {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	credentialIDs := map[string]struct{}{strings.TrimSpace(auth.ID): {}}
+	providers := map[string]struct{}{"codex": {}}
+	if _, errTrigger := h.quotaRecollect.TriggerCollection(context.WithoutCancel(ctx), credentialIDs, providers); errTrigger != nil {
+		log.WithError(errTrigger).Warn("cluster management APICall quota recollection trigger failed")
+	}
+}
+
+func apiCallIsCodexQuotaUsage(method string, parsedURL *url.URL, statusCode int, auth *coreauth.Auth) bool {
+	if parsedURL == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(method), http.MethodGet) || statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return false
+	}
+	if !strings.EqualFold(parsedURL.Scheme, "https") || !strings.EqualFold(parsedURL.Hostname(), "chatgpt.com") {
+		return false
+	}
+	return strings.TrimRight(parsedURL.Path, "/") == "/backend-api/wham/usage"
 }
 
 // apiCallAuthByIndex handles an api call auth by index.

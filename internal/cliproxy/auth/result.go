@@ -35,6 +35,9 @@ type Result struct {
 	Error             *Error
 	RetryAfter        *time.Duration
 	AccessTokenSHA256 string
+	// InternalObservation marks out-of-band control-plane observations that
+	// must update availability without being counted as user requests.
+	InternalObservation bool
 }
 
 // markResultTransition captures the registry side effects derived from a result transition.
@@ -67,11 +70,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	var mutator StateMutator
 	if auth != nil {
 		resultAuthID = auth.ID
-		auth.recordRecentRequest(now, result.Success)
-		if result.Success {
-			auth.Success++
-		} else {
-			auth.Failed++
+		if !result.InternalObservation {
+			auth.recordRecentRequest(now, result.Success)
+			if result.Success {
+				auth.Success++
+			} else {
+				auth.Failed++
+			}
 		}
 		if stateMutator, ok := m.store.(StateMutator); ok && m.resultNeedsGlobalTransition(auth, result, resultModel, now) {
 			mutator = stateMutator
