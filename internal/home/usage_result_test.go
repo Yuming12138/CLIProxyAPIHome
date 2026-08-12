@@ -164,3 +164,70 @@ func TestRecordUsagePayloadFallsBackToAliasWhenModelEmpty(t *testing.T) {
 		t.Fatalf("ModelStates[alias-model] = %#v, want 429 cooldown state", state)
 	}
 }
+
+func TestRecordUsagePayloadConnectionLifecycleDoesNotCoolAuth(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "usage-lifecycle-auth",
+		Index:    "usage-lifecycle-index",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+	}
+	rt := newUsageResultTestRuntime(t, auth)
+
+	rt.RecordUsagePayload(context.Background(), `{
+		"auth_index": "usage-lifecycle-index",
+		"provider": "codex",
+		"model": "gpt-image-2",
+		"failed": true,
+		"fail": {
+			"status_code": 500,
+			"body": "Post images/edits: unexpected EOF",
+			"code": "connection_lifecycle"
+		}
+	}`)
+
+	got, ok := rt.coreManager.GetByID(auth.ID)
+	if !ok || got == nil {
+		t.Fatalf("GetByID(%s) missing auth after usage payload", auth.ID)
+	}
+	if got.Failed != 1 {
+		t.Fatalf("Failed = %d, want request failure to remain counted", got.Failed)
+	}
+	if got.Unavailable || got.Status != coreauth.StatusActive || !got.NextRetryAfter.IsZero() {
+		t.Fatalf("lifecycle failure changed auth availability: %#v", got)
+	}
+	if state := got.ModelStates["gpt-image-2"]; state != nil {
+		t.Fatalf("lifecycle failure created model cooldown: %#v", state)
+	}
+}
+
+func TestRecordUsagePayloadRealHTTP500StillCoolsModel(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "usage-http-500-auth",
+		Index:    "usage-http-500-index",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+	}
+	rt := newUsageResultTestRuntime(t, auth)
+
+	before := time.Now()
+	rt.RecordUsagePayload(context.Background(), `{
+		"auth_index": "usage-http-500-index",
+		"provider": "codex",
+		"model": "gpt-image-2",
+		"failed": true,
+		"fail": {
+			"status_code": 500,
+			"body": "unexpected EOF"
+		}
+	}`)
+
+	got, ok := rt.coreManager.GetByID(auth.ID)
+	if !ok || got == nil {
+		t.Fatalf("GetByID(%s) missing auth after usage payload", auth.ID)
+	}
+	state := got.ModelStates["gpt-image-2"]
+	if state == nil || !state.Unavailable || !state.NextRetryAfter.After(before) {
+		t.Fatalf("real HTTP 500 model state = %#v, want cooldown", state)
+	}
+}
