@@ -31,16 +31,31 @@ func (r *Runtime) RecordUsagePayload(ctx context.Context, payload string) {
 	}
 
 	statusCode := int(gjson.Get(payload, "fail.status_code").Int())
+	failed := gjson.Get(payload, "failed").Bool()
 	if statusCode <= 0 {
-		if gjson.Get(payload, "failed").Bool() {
+		if failed {
 			statusCode = 500
 		} else {
 			statusCode = 200
 		}
 	}
 	body := gjson.Get(payload, "fail.body").String()
+	failureCode := strings.TrimSpace(gjson.Get(payload, "fail.code").String())
 
 	result := coreauth.NewUsageResult(authIndex, provider, model, statusCode, body)
+	if failed && failureCode == coreauth.ErrorCodeConnectionLifecycle {
+		message := strings.TrimSpace(body)
+		if message == "" {
+			message = "connection lifecycle ended before an upstream response"
+		}
+		result.Success = false
+		result.RetryAfter = nil
+		result.Error = &coreauth.Error{
+			Code:      coreauth.ErrorCodeConnectionLifecycle,
+			Message:   message,
+			Retryable: true,
+		}
+	}
 	result.AccessTokenSHA256 = strings.TrimSpace(gjson.Get(payload, "access_token_sha256").String())
 	r.coreManager.MarkResult(ctx, result)
 }

@@ -145,6 +145,9 @@ func (m *Manager) applyResultTransition(auth *Auth, result Result, resultModel s
 	if auth == nil {
 		return transition
 	}
+	if isConnectionLifecycleResultError(result.Error) {
+		return transition
+	}
 	if statusCodeFromResult(result.Error) == http.StatusUnauthorized && result.AccessTokenSHA256 != "" && AuthIsNewerThanObserved(auth, time.Time{}, result.AccessTokenSHA256) {
 		return transition
 	}
@@ -723,6 +726,10 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+func isConnectionLifecycleResultError(err *Error) bool {
+	return err != nil && err.Code == ErrorCodeConnectionLifecycle
 }
 
 // isModelSupportErrorMessage reports whether model support error message.

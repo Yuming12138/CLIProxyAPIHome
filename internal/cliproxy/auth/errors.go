@@ -1,5 +1,9 @@
 package auth
 
+// ErrorCodeConnectionLifecycle marks a transport or session lifecycle failure
+// that did not receive an authoritative upstream HTTP response.
+const ErrorCodeConnectionLifecycle = "connection_lifecycle"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.
