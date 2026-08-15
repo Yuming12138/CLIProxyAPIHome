@@ -83,14 +83,15 @@ type Options struct {
 }
 
 type Collector struct {
-	repo          *cluster.Repository
-	options       Options
-	globalSem     chan struct{}
-	providerSemMu sync.Mutex
-	providerSem   map[string]chan struct{}
-	onDemandMu    sync.Mutex
-	onDemandJobs  map[string]struct{}
-	background    sync.WaitGroup
+	repo            *cluster.Repository
+	options         Options
+	codexCookieJars *chatGPTCloudflareCookieJarPool
+	globalSem       chan struct{}
+	providerSemMu   sync.Mutex
+	providerSem     map[string]chan struct{}
+	onDemandMu      sync.Mutex
+	onDemandJobs    map[string]struct{}
+	background      sync.WaitGroup
 }
 
 func NewCollector(repo *cluster.Repository, options Options) *Collector {
@@ -145,20 +146,28 @@ func NewCollector(repo *cluster.Repository, options Options) *Collector {
 	if options.Now == nil {
 		options.Now = func() time.Time { return time.Now().UTC() }
 	}
-	if options.HTTPClient == nil {
-		options.HTTPClient = func(auth *coreauth.Auth, timeout time.Duration) (*http.Client, error) {
-			globalProxyURL := strings.TrimSpace(options.GlobalProxyURL)
-			if options.GlobalProxyURLProvider != nil {
-				globalProxyURL = strings.TrimSpace(options.GlobalProxyURLProvider())
-			}
-			return quotaHTTPClient(auth, globalProxyURL, timeout)
-		}
-	}
 	collector := &Collector{
-		repo:         repo,
-		options:      options,
-		providerSem:  make(map[string]chan struct{}),
-		onDemandJobs: make(map[string]struct{}),
+		repo:            repo,
+		options:         options,
+		codexCookieJars: newChatGPTCloudflareCookieJarPool(),
+		providerSem:     make(map[string]chan struct{}),
+		onDemandJobs:    make(map[string]struct{}),
+	}
+	if collector.options.HTTPClient == nil {
+		collector.options.HTTPClient = func(auth *coreauth.Auth, timeout time.Duration) (*http.Client, error) {
+			globalProxyURL := strings.TrimSpace(collector.options.GlobalProxyURL)
+			if collector.options.GlobalProxyURLProvider != nil {
+				globalProxyURL = strings.TrimSpace(collector.options.GlobalProxyURLProvider())
+			}
+			client, errClient := quotaHTTPClient(auth, globalProxyURL, timeout)
+			if errClient != nil {
+				return nil, errClient
+			}
+			if client.Jar == nil && auth != nil && normalizedQuotaProvider(auth.Provider) == "codex" {
+				client.Jar = collector.codexCookieJars.jarFor(auth.ID, quotaEffectiveProxyURL(auth, globalProxyURL))
+			}
+			return client, nil
+		}
 	}
 	if repo.DialectName() == "sqlite" {
 		collector.globalSem = make(chan struct{}, options.ProviderConcurrency)
@@ -743,10 +752,7 @@ func normalizedQuotaProvider(provider string) string {
 
 func quotaHTTPClient(auth *coreauth.Auth, globalProxyURL string, timeout time.Duration) (*http.Client, error) {
 	client := &http.Client{Timeout: timeout}
-	proxyURL := strings.TrimSpace(globalProxyURL)
-	if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
+	proxyURL := quotaEffectiveProxyURL(auth, globalProxyURL)
 	if proxyURL == "" {
 		client.Transport = proxyutil.NewDirectTransport()
 		return client, nil
@@ -759,6 +765,15 @@ func quotaHTTPClient(auth *coreauth.Auth, globalProxyURL string, timeout time.Du
 		client.Transport = transport
 	}
 	return client, nil
+}
+
+func quotaEffectiveProxyURL(auth *coreauth.Auth, globalProxyURL string) string {
+	if auth != nil {
+		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+			return proxyURL
+		}
+	}
+	return strings.TrimSpace(globalProxyURL)
 }
 
 func quotaAccessToken(auth *coreauth.Auth) string {
