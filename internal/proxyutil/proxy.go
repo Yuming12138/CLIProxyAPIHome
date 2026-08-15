@@ -1,12 +1,16 @@
 package proxyutil
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/proxy"
 )
@@ -137,6 +141,9 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	case ModeDirect:
 		return proxy.Direct, setting.Mode, nil
 	case ModeProxy:
+		if setting.URL.Scheme == "http" || setting.URL.Scheme == "https" {
+			return &httpConnectDialer{proxyURL: setting.URL, dialer: proxy.Direct}, setting.Mode, nil
+		}
 		dialer, errDialer := proxy.FromURL(setting.URL, proxy.Direct)
 		if errDialer != nil {
 			return nil, setting.Mode, fmt.Errorf("create proxy dialer failed: %w", errDialer)
@@ -145,4 +152,102 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	default:
 		return nil, setting.Mode, nil
 	}
+}
+
+type httpConnectDialer struct {
+	proxyURL *url.URL
+	dialer   proxy.Dialer
+}
+
+func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, addr)
+}
+
+func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	contextDialer, ok := d.dialer.(proxy.ContextDialer)
+	if !ok {
+		return nil, fmt.Errorf("HTTP proxy dialer does not support contexts")
+	}
+	proxyConn, errDial := contextDialer.DialContext(ctx, network, proxyDialAddr(d.proxyURL))
+	if errDial != nil {
+		return nil, fmt.Errorf("dial HTTP proxy failed: %w", errDial)
+	}
+	if deadline, okDeadline := ctx.Deadline(); okDeadline {
+		_ = proxyConn.SetDeadline(deadline)
+	}
+
+	conn := proxyConn
+	if d.proxyURL.Scheme == "https" {
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: d.proxyURL.Hostname()})
+		if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("HTTPS proxy TLS handshake failed: %w", errHandshake)
+		}
+		conn = tlsConn
+	}
+
+	req := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Host: addr},
+		Host:   addr,
+		Header: make(http.Header),
+	}
+	if d.proxyURL.User != nil {
+		req.Header.Set("Proxy-Authorization", proxyAuthorization(d.proxyURL.User))
+	}
+	if errWrite := req.Write(conn); errWrite != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("write CONNECT request failed: %w", errWrite)
+	}
+
+	reader := bufio.NewReader(conn)
+	resp, errRead := http.ReadResponse(reader, req)
+	if errRead != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("read CONNECT response failed: %w", errRead)
+	}
+	if resp.StatusCode != http.StatusOK {
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		_ = conn.Close()
+		return nil, fmt.Errorf("proxy CONNECT returned status %s", resp.Status)
+	}
+
+	if reader.Buffered() > 0 {
+		_ = conn.SetDeadline(time.Time{})
+		return &bufferedConn{Conn: conn, reader: reader}, nil
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return conn, nil
+}
+
+func proxyDialAddr(proxyURL *url.URL) string {
+	port := proxyURL.Port()
+	if port == "" {
+		port = "80"
+		if proxyURL.Scheme == "https" {
+			port = "443"
+		}
+	}
+	return net.JoinHostPort(proxyURL.Hostname(), port)
+}
+
+func proxyAuthorization(user *url.Userinfo) string {
+	username := user.Username()
+	password, _ := user.Password()
+	encoded := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	return "Basic " + encoded
+}
+
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	if c.reader.Buffered() > 0 {
+		return c.reader.Read(p)
+	}
+	return c.Conn.Read(p)
 }

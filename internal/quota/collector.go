@@ -755,8 +755,16 @@ func normalizedQuotaProvider(provider string) string {
 }
 
 func quotaHTTPClient(auth *coreauth.Auth, globalProxyURL string, timeout time.Duration) (*http.Client, error) {
-	client := &http.Client{Timeout: timeout}
 	proxyURL := quotaEffectiveProxyURL(auth, globalProxyURL)
+	if auth != nil && normalizedQuotaProvider(auth.Provider) == "codex" {
+		transport, errTransport := newCodexQuotaUTLSRoundTripper(proxyURL)
+		if errTransport != nil {
+			return nil, errTransport
+		}
+		return &http.Client{Timeout: timeout, Transport: transport}, nil
+	}
+
+	client := &http.Client{Timeout: timeout}
 	if proxyURL == "" {
 		client.Transport = proxyutil.NewDirectTransport()
 		return client, nil
