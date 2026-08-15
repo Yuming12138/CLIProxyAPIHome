@@ -98,6 +98,36 @@ func TestCollectorFailureRetainsLastKnownWindows(t *testing.T) {
 	}
 }
 
+func TestCollectorClassifiesHTMLForbiddenAsRetryableAccessBlock(t *testing.T) {
+	repo := newCollectorTestRepository(t)
+	now := time.Date(2026, 7, 16, 5, 15, 0, 0, time.UTC)
+	seedCollectorAuth(t, repo, "codex-access-blocked", map[string]any{"type": "codex", "access_token": "probe-secret"})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.Header().Set("CF-Ray", "redacted-edge-request")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`<!doctype html><html><title>Just a moment...</title></html>`))
+	}))
+	defer server.Close()
+
+	collector := NewCollector(repo, Options{Owner: "home-a", CodexUsageURL: server.URL, Now: func() time.Time { return now }})
+	collector.collect(context.Background())
+
+	item, errGet := repo.GetQuotaCredential(context.Background(), "codex-access-blocked", now)
+	if errGet != nil {
+		t.Fatalf("GetQuotaCredential() error = %v", errGet)
+	}
+	if item.CollectionStatus != "failed" || item.Error == nil || item.Error.Code != "UPSTREAM_ACCESS_BLOCKED" || !item.Error.Retryable {
+		t.Fatalf("unexpected access-blocked state: %+v", item)
+	}
+	if item.Error.UpstreamStatusCode == nil || *item.Error.UpstreamStatusCode != http.StatusForbidden {
+		t.Fatalf("unexpected upstream status: %+v", item.Error)
+	}
+	if strings.Contains(item.Error.Message, "Just a moment") {
+		t.Fatalf("upstream challenge body leaked into failure metadata: %+v", item.Error)
+	}
+}
+
 func TestCollectorPersistenceFailureClearsCollectingState(t *testing.T) {
 	repo, db := newCollectorTestRepositoryAndDB(t)
 	now := time.Date(2026, 7, 16, 5, 30, 0, 0, time.UTC)
@@ -311,20 +341,28 @@ func TestQuotaProbeEligibilitySkipsNonQuotaCooldownAndAllowsQuotaRecheck(t *test
 
 func TestQuotaHTTPProbeErrorClassification(t *testing.T) {
 	for _, test := range []struct {
+		name      string
 		status    int
+		headers   http.Header
+		body      string
 		code      string
 		retryable bool
 	}{
-		{status: http.StatusUnauthorized, code: "UPSTREAM_AUTH_REJECTED", retryable: false},
-		{status: http.StatusForbidden, code: "UPSTREAM_AUTH_REJECTED", retryable: false},
-		{status: http.StatusTooManyRequests, code: "UPSTREAM_RATE_LIMITED", retryable: true},
-		{status: http.StatusInternalServerError, code: "UPSTREAM_UNAVAILABLE", retryable: true},
-		{status: http.StatusBadRequest, code: "UPSTREAM_UNAVAILABLE", retryable: false},
+		{name: "unauthorized JSON", status: http.StatusUnauthorized, headers: http.Header{"Content-Type": []string{"application/json"}}, body: `{"error":"invalid_token"}`, code: "UPSTREAM_AUTH_REJECTED", retryable: false},
+		{name: "forbidden JSON", status: http.StatusForbidden, headers: http.Header{"Content-Type": []string{"application/json"}}, body: `{"error":"forbidden"}`, code: "UPSTREAM_AUTH_REJECTED", retryable: false},
+		{name: "forbidden HTML", status: http.StatusForbidden, headers: http.Header{"Content-Type": []string{"text/html; charset=UTF-8"}}, body: `<!doctype html><title>Just a moment...</title>`, code: "UPSTREAM_ACCESS_BLOCKED", retryable: true},
+		{name: "Cloudflare challenge header", status: http.StatusForbidden, headers: http.Header{"Cf-Mitigated": []string{"challenge"}}, code: "UPSTREAM_ACCESS_BLOCKED", retryable: true},
+		{name: "Cloudflare challenge body", status: http.StatusForbidden, body: `<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>`, code: "UPSTREAM_ACCESS_BLOCKED", retryable: true},
+		{name: "rate limited", status: http.StatusTooManyRequests, code: "UPSTREAM_RATE_LIMITED", retryable: true},
+		{name: "server error", status: http.StatusInternalServerError, code: "UPSTREAM_UNAVAILABLE", retryable: true},
+		{name: "bad request", status: http.StatusBadRequest, code: "UPSTREAM_UNAVAILABLE", retryable: false},
 	} {
-		failure := quotaHTTPProbeError(test.status, "request-id")
-		if failure.code != test.code || failure.retryable != test.retryable || failure.statusCode != test.status || failure.requestID != "request-id" {
-			t.Fatalf("quotaHTTPProbeError(%d) = %+v", test.status, failure)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			failure := quotaHTTPProbeError(test.status, test.headers, []byte(test.body), "request-id")
+			if failure.code != test.code || failure.retryable != test.retryable || failure.statusCode != test.status || failure.requestID != "request-id" {
+				t.Fatalf("quotaHTTPProbeError(%d) = %+v", test.status, failure)
+			}
+		})
 	}
 }
 

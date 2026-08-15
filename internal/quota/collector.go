@@ -522,7 +522,7 @@ func (c *Collector) probeRequest(ctx context.Context, auth *coreauth.Auth, metho
 		return nil, resp.Header, &probeError{code: "UPSTREAM_RESPONSE_INVALID", message: "Upstream quota response could not be read safely.", retryable: true, statusCode: resp.StatusCode, requestID: requestID}
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		failure := quotaHTTPProbeError(resp.StatusCode, requestID)
+		failure := quotaHTTPProbeError(resp.StatusCode, resp.Header, payload, requestID)
 		failure.retryAfter = quotaRetryAfter(resp.Header, c.options.Now().UTC())
 		return nil, resp.Header, failure
 	}
@@ -826,13 +826,42 @@ func quotaRetryAfter(headers http.Header, now time.Time) time.Duration {
 	return 0
 }
 
-func quotaHTTPProbeError(status int, requestID string) *probeError {
+func quotaHTTPProbeError(status int, headers http.Header, payload []byte, requestID string) *probeError {
 	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized:
+		return &probeError{code: "UPSTREAM_AUTH_REJECTED", message: "Upstream rejected the credential.", retryable: false, statusCode: status, requestID: requestID}
+	case http.StatusForbidden:
+		if quotaResponseLooksLikeAccessBlock(headers, payload) {
+			return &probeError{code: "UPSTREAM_ACCESS_BLOCKED", message: "Upstream quota endpoint access was blocked before credential validation.", retryable: true, statusCode: status, requestID: requestID}
+		}
 		return &probeError{code: "UPSTREAM_AUTH_REJECTED", message: "Upstream rejected the credential.", retryable: false, statusCode: status, requestID: requestID}
 	case http.StatusTooManyRequests:
 		return &probeError{code: "UPSTREAM_RATE_LIMITED", message: "Upstream quota endpoint rate limited the probe.", retryable: true, statusCode: status, requestID: requestID}
 	default:
 		return &probeError{code: "UPSTREAM_UNAVAILABLE", message: "Upstream quota endpoint returned an unavailable response.", retryable: status >= 500, statusCode: status, requestID: requestID}
 	}
+}
+
+func quotaResponseLooksLikeAccessBlock(headers http.Header, payload []byte) bool {
+	contentType := strings.ToLower(strings.TrimSpace(headers.Get("Content-Type")))
+	if strings.HasPrefix(contentType, "text/html") || strings.HasPrefix(contentType, "application/xhtml+xml") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(headers.Get("CF-Mitigated")), "challenge") {
+		return true
+	}
+	sample := bytes.TrimSpace(payload)
+	if len(sample) > 8192 {
+		sample = sample[:8192]
+	}
+	lowerSample := strings.ToLower(string(sample))
+	if strings.HasPrefix(lowerSample, "<!doctype html") || strings.HasPrefix(lowerSample, "<html") {
+		return true
+	}
+	for _, marker := range []string{"cf-chl-", "__cf_chl_", "challenge-platform", "cloudflare ray id", "attention required", "just a moment"} {
+		if strings.Contains(lowerSample, marker) {
+			return true
+		}
+	}
+	return false
 }
