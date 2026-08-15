@@ -2736,7 +2736,7 @@ Credential fields:
 | `account`, `project` | string/null | Masked display account/project metadata when present. Search uses these displayed values. |
 | `credential_status` | string | `enabled`, `disabled`, `unavailable`, `cooldown`, or `unknown`. |
 | `quota_status` | string | `healthy`, `low`, `exhausted`, `unknown`, `error`, or `unsupported`. |
-| `freshness` | string | `fresh`, `stale`, or `never`. `stale` is computed when current time reaches `expires_at`; a legacy observation without an expiry is also stale. |
+| `freshness` | string | `fresh`, `stale`, or `never`. This credential-level compatibility field follows the persisted collection snapshot. `stale` is computed when current time reaches `expires_at`; a legacy observation without an expiry is also stale. Detail clients should use `window_observation` for the newest returned window facts. |
 | `collection_status` | string | `idle`, `collecting`, `success`, `partial`, `failed`, or `unsupported`. |
 | `source` | string/null | `response_header`, `active_probe`, `mixed`, or `null`. |
 | `observed_at`, `expires_at` | string/null | Latest valid observation and its freshness deadline. |
@@ -2851,9 +2851,17 @@ Returns the same credential core object, every current window in stable order, o
     "window_count": 1
   },
   "windows": [],
+  "window_observation": {
+    "source": "response_header",
+    "freshness": "fresh",
+    "observed_at": "2026-07-16T01:00:00Z",
+    "expires_at": "2026-07-16T01:30:00Z"
+  },
   "reset_credits": {
     "available_count": 3,
+    "freshness": "fresh",
     "observed_at": "2026-07-16T01:00:00Z",
+    "expires_at": "2026-07-16T01:30:00Z",
     "credits": [
       {
         "key": "1d4e58b2f3a4c5d6e7f809ab",
@@ -2879,7 +2887,9 @@ Returns the same credential core object, every current window in stable order, o
 }
 ```
 
-`reset_credits` is `null` when the provider does not report this capability or no reliable observation is available. It is detail-only and is not included in `GET /quota/credentials` list items. `available_count` is the latest provider-reported number of currently available credits, `observed_at` is the time of that reset-credit observation, and `credits` contains the bounded, expiry-sorted list of currently available Codex rate-limit reset credits. When the usage summary supplies a positive count but the independent detail request fails, `available_count` remains current while `credits` is empty and `collection_status=partial`; older quantities and expired detail rows are not presented as current. Each credit includes a 24-character `key`, which is a stable one-way digest suitable for deriving an idempotent request ID. The provider reset-credit identifier is never returned. This endpoint is read-only and does not consume a credit.
+`window_observation` is always an object and reports the source, freshness, observation time, and freshness deadline of the newest observation batch among the returned windows. With no observed windows it returns `freshness=never` and null source/timestamps. It is intentionally independent of `collection`: after an active WHAM probe fails, a newer passive response-header observation can make `window_observation.freshness=fresh` while `collection.freshness=stale` and `collection.status=failed` continue to describe the failed active probe.
+
+`reset_credits` is `null` when the provider does not report this capability or no reliable observation is available. It is detail-only and is not included in `GET /quota/credentials` list items. `available_count` is the last provider-reported number of available credits; `observed_at`, `expires_at`, and `freshness` describe that reset-credit observation independently of quota windows and active collection status. Clients must present a stale observation as unknown rather than as a current zero balance. Legacy observations without a stored deadline use the existing 30-minute snapshot freshness interval. `credits` contains the bounded, expiry-sorted list of available Codex rate-limit reset credits. When the usage summary supplies a positive count but the independent detail request fails, `available_count` remains current while `credits` is empty and `collection_status=partial`; older quantities and expired detail rows are not presented as current. Each credit includes a 24-character `key`, which is a stable one-way digest suitable for deriving an idempotent request ID. The provider reset-credit identifier is never returned. This endpoint is read-only and does not consume a credit.
 
 ### POST `/quota/credentials/:credential_id/reset-credits/consume`
 

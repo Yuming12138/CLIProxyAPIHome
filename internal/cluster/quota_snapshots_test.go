@@ -1885,6 +1885,14 @@ func TestQuotaSafeErrorMessagePreservesValidUTF8(t *testing.T) {
 	}
 }
 
+func TestQuotaResetCreditsLegacyObservationGetsFallbackExpiry(t *testing.T) {
+	observedAt := time.Date(2026, 8, 15, 3, 20, 0, 0, time.UTC)
+	value := quotaResetCreditsFromJSON(JSONB(`{"available_count":0,"observed_at":"2026-08-15T03:20:00Z","credits":[]}`))
+	if value == nil || value.ExpiresAt == nil || !value.ExpiresAt.Equal(observedAt.Add(quotaSnapshotFallbackFreshness)) {
+		t.Fatalf("legacy reset-credit observation = %+v, want fallback expiry", value)
+	}
+}
+
 func TestAuthTypeChangeClearsAndRejectsOldQuotaObservation(t *testing.T) {
 	ctx := context.Background()
 	repo, closeRepo := newBillingTestRepository(t, ctx)

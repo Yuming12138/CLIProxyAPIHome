@@ -60,7 +60,7 @@ func TestCollectorPersistsCodexPlanWindowsAndResetCredits(t *testing.T) {
 
 	collector := NewCollector(repo, Options{
 		Owner: "home-a", HomeID: "home-a", CodexUsageURL: server.URL + "/usage",
-		CodexResetCreditsURL: server.URL + "/resets", Now: func() time.Time { return now },
+		CodexResetCreditsURL: server.URL + "/resets", SnapshotFreshness: 42 * time.Minute, Now: func() time.Time { return now },
 	})
 	collector.collect(context.Background())
 
@@ -94,6 +94,9 @@ func TestCollectorPersistsCodexPlanWindowsAndResetCredits(t *testing.T) {
 	}
 	if item.ResetCredits == nil || item.ResetCredits.AvailableCount == nil || *item.ResetCredits.AvailableCount != 3 || len(item.ResetCredits.Credits) != 3 {
 		t.Fatalf("reset credits = %+v", item.ResetCredits)
+	}
+	if item.ResetCredits.ExpiresAt == nil || !item.ResetCredits.ExpiresAt.Equal(now.Add(42*time.Minute)) {
+		t.Fatalf("reset-credit observation expiry = %v, want collector freshness", item.ResetCredits.ExpiresAt)
 	}
 	if item.ResetCredits.Credits[0].ID != "credit-1" || item.ResetCredits.Credits[1].ID != "credit-2" || item.ResetCredits.Credits[2].ID != "credit-3" {
 		t.Fatalf("sorted reset credits = %+v", item.ResetCredits.Credits)

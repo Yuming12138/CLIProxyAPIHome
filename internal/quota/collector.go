@@ -353,6 +353,10 @@ func (c *Collector) collectCredential(ctx context.Context, auth *coreauth.Auth, 
 	}
 	observedAt := c.options.Now().UTC()
 	expiresAt := observedAt.Add(c.options.SnapshotFreshness)
+	if result.resetCredits != nil {
+		resetCreditsExpiresAt := expiresAt
+		result.resetCredits.ExpiresAt = &resetCreditsExpiresAt
+	}
 	status := quotaWindowAggregateStatus(result.windows)
 	collectionStatus := "success"
 	if result.partial {

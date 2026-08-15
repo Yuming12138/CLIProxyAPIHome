@@ -2735,7 +2735,7 @@ collector 直接读取 DB 凭证，不接受 HMC 提交 URL。探测前会重新
 | `account`、`project` | string/null | 已脱敏的账号和项目展示元数据；搜索使用同一展示值。 |
 | `credential_status` | string | `enabled`、`disabled`、`unavailable`、`cooldown` 或 `unknown`。 |
 | `quota_status` | string | `healthy`、`low`、`exhausted`、`unknown`、`error` 或 `unsupported`。 |
-| `freshness` | string | `fresh`、`stale` 或 `never`；当前时间达到 `expires_at` 后动态变为 `stale`，旧数据存在观测时间但缺少有效期时也视为 `stale`。 |
+| `freshness` | string | `fresh`、`stale` 或 `never`；该凭证级兼容字段跟随持久化的 collection snapshot。当前时间达到 `expires_at` 后动态变为 `stale`，旧数据存在观测时间但缺少有效期时也视为 `stale`。详情客户端应使用 `window_observation` 判断最新返回窗口。 |
 | `collection_status` | string | `idle`、`collecting`、`success`、`partial`、`failed` 或 `unsupported`。 |
 | `source` | string/null | `response_header`、`active_probe`、`mixed` 或 `null`。 |
 | `observed_at`、`expires_at` | string/null | 最近有效观测与新鲜度截止时间。 |
@@ -2833,9 +2833,17 @@ collector 直接读取 DB 凭证，不接受 HMC 提交 URL。探测前会重新
     "window_count": 1
   },
   "windows": [],
+  "window_observation": {
+    "source": "response_header",
+    "freshness": "fresh",
+    "observed_at": "2026-07-16T01:00:00Z",
+    "expires_at": "2026-07-16T01:30:00Z"
+  },
   "reset_credits": {
     "available_count": 3,
+    "freshness": "fresh",
     "observed_at": "2026-07-16T01:00:00Z",
+    "expires_at": "2026-07-16T01:30:00Z",
     "credits": [
       {
         "key": "1d4e58b2f3a4c5d6e7f809ab",
@@ -2861,7 +2869,9 @@ collector 直接读取 DB 凭证，不接受 HMC 提交 URL。探测前会重新
 }
 ```
 
-Provider 未报告该能力或没有可靠观测时，`reset_credits` 为 `null`。该字段只在详情响应中提供，不包含在 `GET /quota/credentials` 列表项里。`available_count` 是 Provider 最近一次报告的当前可用次数，`observed_at` 是该次 reset-credit 观测时间，`credits` 是经过数量限制并按过期时间排序的当前可用 Codex rate-limit reset credit 列表。usage 汇总提供正数次数、但独立详情请求失败时，`available_count` 保持本次最新值，`credits` 为空且 `collection_status=partial`；旧数量和已过期详情不会继续表现为当前数据。每个 credit 还包含一个 24 字符的 `key`，它是稳定的单向摘要，可用于派生幂等请求 ID；Provider 原始 reset-credit 标识永不返回。该 endpoint 只读，不会消费 reset credit。
+`window_observation` 始终为对象，描述返回窗口中最新一批观测的来源、新鲜度、观测时间与新鲜度截止时间；没有任何已观测窗口时返回 `freshness=never`，来源和时间均为 `null`。它与 `collection` 有意独立：主动 WHAM 探测失败后，如果出现更新的被动响应头观测，`window_observation.freshness` 可以是 `fresh`，而 `collection.freshness=stale`、`collection.status=failed` 仍准确表示主动探测失败。
+
+Provider 未报告该能力或没有可靠观测时，`reset_credits` 为 `null`。该字段只在详情响应中提供，不包含在 `GET /quota/credentials` 列表项里。`available_count` 是 Provider 最后一次报告的可用次数；`observed_at`、`expires_at` 和 `freshness` 独立描述该次 reset-credit 观测，不与额度窗口或主动采集状态混用。客户端必须把 stale 观测展示为“状态未知”，不能继续显示为当前 0 次。旧记录未保存截止时间时，沿用现有 30 分钟 snapshot freshness。`credits` 是经过数量限制并按过期时间排序的可用 Codex rate-limit reset credit 列表。usage 汇总提供正数次数、但独立详情请求失败时，`available_count` 保持本次最新值，`credits` 为空且 `collection_status=partial`；旧数量和已过期详情不会继续表现为当前数据。每个 credit 还包含一个 24 字符的 `key`，它是稳定的单向摘要，可用于派生幂等请求 ID；Provider 原始 reset-credit 标识永不返回。该 endpoint 只读，不会消费 reset credit。
 
 ### POST `/quota/credentials/:credential_id/reset-credits/consume`
 

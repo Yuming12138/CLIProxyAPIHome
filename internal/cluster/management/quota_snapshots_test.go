@@ -26,6 +26,7 @@ func TestQuotaManagementListAndDetailReadDatabaseSnapshots(t *testing.T) {
 	resetAt := now.Add(30 * time.Minute)
 	resetCreditGrantedAt := now.Add(-time.Hour)
 	resetCreditExpiry := now.Add(72 * time.Hour)
+	resetCreditObservationExpiry := now.Add(45 * time.Minute)
 	remaining := 0.15
 	period := float64(5)
 	availableResetCredits := 3
@@ -37,6 +38,7 @@ func TestQuotaManagementListAndDetailReadDatabaseSnapshots(t *testing.T) {
 		ResetCredits: &cluster.QuotaResetCredits{
 			AvailableCount: &availableResetCredits,
 			ObservedAt:     now,
+			ExpiresAt:      &resetCreditObservationExpiry,
 			Credits: []cluster.QuotaResetCredit{{
 				ID: "reset-credit-1", Status: "available", GrantedAt: resetCreditGrantedAt, ExpiresAt: &resetCreditExpiry,
 			}},
@@ -110,6 +112,13 @@ func TestQuotaManagementListAndDetailReadDatabaseSnapshots(t *testing.T) {
 	if !ok || resetCredits["available_count"] != float64(3) {
 		t.Fatalf("detail reset_credits = %#v, want available_count=3", detailPayload["reset_credits"])
 	}
+	if resetCredits["freshness"] != "fresh" || resetCredits["observed_at"] != now.Format(time.RFC3339) || resetCredits["expires_at"] != resetCreditObservationExpiry.Format(time.RFC3339) {
+		t.Fatalf("detail reset-credit observation = %#v, want independent fresh timing", resetCredits)
+	}
+	windowObservation, ok := detailPayload["window_observation"].(map[string]any)
+	if !ok || windowObservation["source"] != "response_header" || windowObservation["freshness"] != "fresh" || windowObservation["observed_at"] != now.Format(time.RFC3339) || windowObservation["expires_at"] != expiresAt.Format(time.RFC3339) {
+		t.Fatalf("detail window_observation = %#v, want fresh response_header timing", detailPayload["window_observation"])
+	}
 	credits, ok := resetCredits["credits"].([]any)
 	if !ok || len(credits) != 1 {
 		t.Fatalf("detail reset credit entries = %#v, want one", resetCredits["credits"])
@@ -124,6 +133,28 @@ func TestQuotaManagementListAndDetailReadDatabaseSnapshots(t *testing.T) {
 	}
 	if strings.Contains(detailResponse.Body.String(), "management-token-must-not-leak") {
 		t.Fatalf("detail response leaked credential token: %s", detailResponse.Body.String())
+	}
+}
+
+func TestQuotaWindowObservationUsesNewestWindowIndependently(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 30, 0, 0, time.UTC)
+	oldObservedAt := now.Add(-2 * time.Hour)
+	oldExpiresAt := now.Add(-90 * time.Minute)
+	newObservedAt := now.Add(-5 * time.Minute)
+	newExpiresAt := now.Add(25 * time.Minute)
+	windows := []cluster.QuotaWindow{
+		{ID: "codex-weekly", Source: "active_probe", ObservedAt: oldObservedAt, ExpiresAt: &oldExpiresAt},
+		{ID: "codex-bengalfox-weekly", Source: "response_header", ObservedAt: newObservedAt, ExpiresAt: &newExpiresAt},
+	}
+
+	observation := quotaWindowObservationDTOFrom(windows, now)
+	if observation.Source == nil || *observation.Source != "response_header" || observation.Freshness != "fresh" || observation.ObservedAt == nil || !observation.ObservedAt.Equal(newObservedAt) || observation.ExpiresAt == nil || !observation.ExpiresAt.Equal(newExpiresAt) {
+		t.Fatalf("window observation = %+v, want newest fresh response_header observation", observation)
+	}
+
+	empty := quotaWindowObservationDTOFrom(nil, now)
+	if empty.Freshness != "never" || empty.Source != nil || empty.ObservedAt != nil || empty.ExpiresAt != nil {
+		t.Fatalf("empty window observation = %+v, want never with null timing", empty)
 	}
 }
 

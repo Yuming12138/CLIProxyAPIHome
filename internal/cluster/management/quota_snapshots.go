@@ -33,31 +33,109 @@ type quotaResetCreditDTO struct {
 
 type quotaResetCreditsDTO struct {
 	AvailableCount *int                  `json:"available_count"`
+	Freshness      string                `json:"freshness"`
 	ObservedAt     time.Time             `json:"observed_at"`
+	ExpiresAt      *time.Time            `json:"expires_at"`
 	Credits        []quotaResetCreditDTO `json:"credits"`
 }
 
-func quotaResetCreditsDTOFrom(value *cluster.QuotaResetCredits) *quotaResetCreditsDTO {
+type quotaWindowObservationDTO struct {
+	Source     *string    `json:"source"`
+	Freshness  string     `json:"freshness"`
+	ObservedAt *time.Time `json:"observed_at"`
+	ExpiresAt  *time.Time `json:"expires_at"`
+}
+
+func quotaResetCreditsDTOFrom(value *cluster.QuotaResetCredits, now time.Time) *quotaResetCreditsDTO {
 	if value == nil {
 		return nil
 	}
+	observedAt := value.ObservedAt.UTC()
+	observationExpiresAt := quotaManagementUTC(value.ExpiresAt)
 	credits := make([]quotaResetCreditDTO, 0, len(value.Credits))
 	for _, credit := range value.Credits {
-		var expiresAt *time.Time
+		var creditExpiresAt *time.Time
 		if credit.ExpiresAt != nil {
 			expiresAtUTC := credit.ExpiresAt.UTC()
-			expiresAt = &expiresAtUTC
+			creditExpiresAt = &expiresAtUTC
 		}
 		credits = append(credits, quotaResetCreditDTO{
 			Key: cluster.QuotaResetCreditPublicKey(credit.ID), Status: credit.Status,
-			GrantedAt: credit.GrantedAt.UTC(), ExpiresAt: expiresAt,
+			GrantedAt: credit.GrantedAt.UTC(), ExpiresAt: creditExpiresAt,
 		})
 	}
 	return &quotaResetCreditsDTO{
 		AvailableCount: value.AvailableCount,
-		ObservedAt:     value.ObservedAt.UTC(),
+		Freshness:      quotaManagementFreshness(&observedAt, observationExpiresAt, now),
+		ObservedAt:     observedAt,
+		ExpiresAt:      observationExpiresAt,
 		Credits:        credits,
 	}
+}
+
+func quotaWindowObservationDTOFrom(windows []cluster.QuotaWindow, now time.Time) quotaWindowObservationDTO {
+	result := quotaWindowObservationDTO{Freshness: "never"}
+	for _, window := range windows {
+		observedAt := window.ObservedAt.UTC()
+		if observedAt.IsZero() || (result.ObservedAt != nil && !observedAt.After(*result.ObservedAt)) {
+			continue
+		}
+		result.ObservedAt = &observedAt
+	}
+	if result.ObservedAt == nil {
+		return result
+	}
+
+	var source string
+	var expiresAt *time.Time
+	expiryComplete := true
+	for _, window := range windows {
+		if !window.ObservedAt.UTC().Equal(*result.ObservedAt) {
+			continue
+		}
+		windowSource := strings.TrimSpace(window.Source)
+		if windowSource != "" {
+			if source == "" {
+				source = windowSource
+			} else if source != windowSource {
+				source = "mixed"
+			}
+		}
+		if window.ExpiresAt == nil {
+			expiryComplete = false
+			continue
+		}
+		windowExpiresAt := window.ExpiresAt.UTC()
+		if expiresAt == nil || windowExpiresAt.Before(*expiresAt) {
+			expiresAt = &windowExpiresAt
+		}
+	}
+	if source != "" {
+		result.Source = &source
+	}
+	if expiryComplete {
+		result.ExpiresAt = expiresAt
+	}
+	result.Freshness = quotaManagementFreshness(result.ObservedAt, result.ExpiresAt, now)
+	return result
+}
+
+func quotaManagementFreshness(observedAt *time.Time, expiresAt *time.Time, now time.Time) string {
+	if observedAt == nil || observedAt.IsZero() {
+		return "never"
+	}
+	if expiresAt != nil && now.UTC().Before(expiresAt.UTC()) {
+		return "fresh"
+	}
+	return "stale"
+}
+
+func quotaManagementUTC(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	utc := value.UTC()
+	return &utc
 }
 
 func (h *Handler) ListQuotaCredentials(c *gin.Context) {
@@ -90,7 +168,8 @@ func (h *Handler) GetQuotaCredential(c *gin.Context) {
 	}
 	ctx, cancel := h.requestContext(c)
 	defer cancel()
-	item, errGet := h.repo.GetQuotaCredential(ctx, credentialID, time.Now().UTC())
+	now := time.Now().UTC()
+	item, errGet := h.repo.GetQuotaCredential(ctx, credentialID, now)
 	if errGet != nil {
 		if errors.Is(errGet, gorm.ErrRecordNotFound) {
 			respondQuotaHTTPError(c, http.StatusNotFound, "QUOTA_CREDENTIAL_NOT_FOUND", "quota credential not found", false)
@@ -101,16 +180,17 @@ func (h *Handler) GetQuotaCredential(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"credential":    item,
-		"windows":       item.Windows,
-		"reset_credits": quotaResetCreditsDTOFrom(item.ResetCredits),
+		"credential":         item,
+		"windows":            item.Windows,
+		"window_observation": quotaWindowObservationDTOFrom(item.Windows, now),
+		"reset_credits":      quotaResetCreditsDTOFrom(item.ResetCredits, now),
 		"collection": gin.H{
 			"source": item.Source, "freshness": item.Freshness, "status": item.CollectionStatus,
 			"observed_at": item.ObservedAt, "expires_at": item.ExpiresAt, "last_attempt_at": item.LastAttemptAt,
 			"last_success_at": item.LastSuccessAt, "next_probe_at": item.NextProbeAt,
 			"consecutive_failures": item.ConsecutiveFailure, "error": item.Error,
 		},
-		"generated_at": time.Now().UTC(),
+		"generated_at": now,
 	})
 }
 

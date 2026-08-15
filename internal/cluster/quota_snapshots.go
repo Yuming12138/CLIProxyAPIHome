@@ -181,6 +181,7 @@ type QuotaResetCredit struct {
 type QuotaResetCredits struct {
 	AvailableCount *int               `json:"available_count"`
 	ObservedAt     time.Time          `json:"observed_at"`
+	ExpiresAt      *time.Time         `json:"expires_at"`
 	Credits        []QuotaResetCredit `json:"credits"`
 }
 
@@ -1281,6 +1282,15 @@ func normalizeQuotaResetCredits(value *QuotaResetCredits) error {
 		return fmt.Errorf("quota reset credits observed_at is required")
 	}
 	value.ObservedAt = value.ObservedAt.UTC()
+	if value.ExpiresAt == nil {
+		expiresAt := value.ObservedAt.Add(quotaSnapshotFallbackFreshness)
+		value.ExpiresAt = &expiresAt
+	} else {
+		value.ExpiresAt = quotaUTC(value.ExpiresAt)
+		if !value.ExpiresAt.After(value.ObservedAt) {
+			return fmt.Errorf("quota reset credits expires_at must be after observed_at")
+		}
+	}
 	if value.AvailableCount != nil && (*value.AvailableCount < 0 || *value.AvailableCount > 1_000_000) {
 		return fmt.Errorf("quota reset credits available_count is out of range")
 	}
