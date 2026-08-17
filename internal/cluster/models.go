@@ -600,6 +600,7 @@ type AuthIndex struct {
 	StatusMessage    string
 	Disabled         bool
 	Unavailable      bool
+	LastRefreshedAt  time.Time
 	NextRefreshAfter time.Time
 	NextRetryAfter   time.Time
 	Quota            coreauth.QuotaState

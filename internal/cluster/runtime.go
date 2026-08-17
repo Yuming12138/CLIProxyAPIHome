@@ -548,6 +548,9 @@ func authIndexFromRecord(record *AuthRecord, auth *coreauth.Auth) AuthIndex {
 		item.Status = record.Status
 		item.Disabled = record.Disabled
 		item.Unavailable = record.Unavailable
+		if record.LastRefreshedAt != nil {
+			item.LastRefreshedAt = record.LastRefreshedAt.UTC()
+		}
 		item.BaseURL = record.BaseURL
 		item.ModelsHash = record.ModelsHash
 	}
@@ -561,6 +564,7 @@ func authIndexFromRecord(record *AuthRecord, auth *coreauth.Auth) AuthIndex {
 		item.StatusMessage = auth.StatusMessage
 		item.Disabled = auth.Disabled
 		item.Unavailable = auth.Unavailable
+		item.LastRefreshedAt = auth.LastRefreshedAt
 		item.NextRefreshAfter = auth.NextRefreshAfter
 		item.NextRetryAfter = auth.NextRetryAfter
 		item.Quota = auth.Quota
@@ -603,6 +607,7 @@ func authFromIndex(item AuthIndex) *coreauth.Auth {
 		StatusMessage:    item.StatusMessage,
 		Disabled:         item.Disabled,
 		Unavailable:      item.Unavailable,
+		LastRefreshedAt:  item.LastRefreshedAt,
 		NextRefreshAfter: item.NextRefreshAfter,
 		NextRetryAfter:   item.NextRetryAfter,
 		Quota:            item.Quota,

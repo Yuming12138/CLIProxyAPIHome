@@ -416,6 +416,7 @@ func (r *Repository) ListAuthIndex(ctx context.Context) ([]AuthIndex, error) {
 			StatusMessage:    auth.StatusMessage,
 			Disabled:         auth.Disabled,
 			Unavailable:      auth.Unavailable,
+			LastRefreshedAt:  auth.LastRefreshedAt,
 			NextRefreshAfter: auth.NextRefreshAfter,
 			NextRetryAfter:   auth.NextRetryAfter,
 			Quota:            auth.Quota,

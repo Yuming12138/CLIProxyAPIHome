@@ -177,16 +177,19 @@ func TestClusterAuthIndexCarriesCooldownState(t *testing.T) {
 	repo := newQuotaTestRepository(t)
 	ctx := context.Background()
 
-	recover := time.Now().Add(10 * time.Minute).Round(0)
+	now := time.Now().Round(0)
+	recover := now.Add(10 * time.Minute)
+	lastRefreshedAt := now.Add(-24 * time.Hour)
 	seed := &coreauth.Auth{
-		ID:             authID,
-		Index:          authID,
-		Provider:       "codex",
-		Status:         coreauth.StatusError,
-		Unavailable:    true,
-		NextRetryAfter: recover,
-		Quota:          coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: recover, BackoffLevel: 4},
-		Metadata:       map[string]any{"email": "user@example.com"},
+		ID:              authID,
+		Index:           authID,
+		Provider:        "codex",
+		Status:          coreauth.StatusError,
+		Unavailable:     true,
+		LastRefreshedAt: lastRefreshedAt,
+		NextRetryAfter:  recover,
+		Quota:           coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: recover, BackoffLevel: 4},
+		Metadata:        map[string]any{"email": "user@example.com"},
 		ModelStates: map[string]*coreauth.ModelState{
 			model: {
 				Status:         coreauth.StatusError,
@@ -209,6 +212,13 @@ func TestClusterAuthIndexCarriesCooldownState(t *testing.T) {
 		t.Fatalf("expected one minimal auth, got %d", len(minimals))
 	}
 	minimal := minimals[0]
+	if !minimal.LastRefreshedAt.Equal(lastRefreshedAt) {
+		t.Fatalf("expected minimal auth LastRefreshedAt %v, got %v", lastRefreshedAt, minimal.LastRefreshedAt)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	if manager.ShouldRefreshCredential(minimal, now) {
+		t.Fatalf("minimal auth with recent refresh was incorrectly due for immediate refresh: %+v", minimal)
+	}
 	if !minimal.NextRetryAfter.Equal(recover) {
 		t.Fatalf("expected minimal auth NextRetryAfter %v, got %v", recover, minimal.NextRetryAfter)
 	}

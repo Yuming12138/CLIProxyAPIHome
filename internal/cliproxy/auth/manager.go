@@ -1231,9 +1231,10 @@ func ApplyRefreshLeaseState(auth *Auth, now, retryAt time.Time) {
 	}
 	now = now.UTC()
 	retryAt = normalizeRefreshRetryAt(now, retryAt)
-	auth.NextRefreshAfter = retryAt
-	if accessTokenUsableAt(auth, now) {
+	usable, known := accessTokenUsabilityAt(auth, now)
+	if usable || !known {
 		clearRefreshDispatchState(auth, now)
+		auth.NextRefreshAfter = retryAt
 		auth.UpdatedAt = now
 		return
 	}

@@ -575,6 +575,7 @@ func recomputeAggregatedAvailability(auth *Auth, now time.Time) {
 		clearAggregatedAvailability(auth)
 		return
 	}
+	wasModelScoped := authCooldownScope(auth) == cooldownScopeModel
 	allUnavailable := true
 	earliestRetry := time.Time{}
 	quotaExceeded := false
@@ -598,8 +599,7 @@ func recomputeAggregatedAvailability(auth *Auth, now time.Time) {
 					earliestRetry = state.NextRetryAfter
 				}
 			} else {
-				state.Unavailable = false
-				state.NextRetryAfter = time.Time{}
+				resetModelState(state, now)
 			}
 		}
 		if !stateUnavailable {
@@ -640,6 +640,11 @@ func recomputeAggregatedAvailability(auth *Auth, now time.Time) {
 		setAuthCooldownScope(auth, cooldownScopeModel)
 	} else {
 		setAuthCooldownScope(auth, "")
+		if wasModelScoped && !hasModelError(auth, now) {
+			auth.Status = StatusActive
+			auth.StatusMessage = ""
+			auth.LastError = nil
+		}
 	}
 }
 
@@ -668,7 +673,7 @@ func clearAggregatedAvailability(auth *Auth) {
 	setAuthCooldownScope(auth, "")
 }
 
-// hasModelError reports whether model error is present.
+// hasModelError reports whether a model error is actively blocking dispatch.
 func hasModelError(auth *Auth, now time.Time) bool {
 	if auth == nil || len(auth.ModelStates) == 0 {
 		return false
@@ -677,13 +682,8 @@ func hasModelError(auth *Auth, now time.Time) bool {
 		if state == nil {
 			continue
 		}
-		if state.LastError != nil {
+		if state.Status == StatusError && state.Unavailable && state.NextRetryAfter.After(now) {
 			return true
-		}
-		if state.Status == StatusError {
-			if state.Unavailable && (state.NextRetryAfter.IsZero() || state.NextRetryAfter.After(now)) {
-				return true
-			}
 		}
 	}
 	return false

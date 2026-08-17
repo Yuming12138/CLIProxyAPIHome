@@ -220,6 +220,10 @@ func TestMarkRefreshPendingBlocksDispatchUntilRefreshCompletes(t *testing.T) {
 		Unavailable:      true,
 		NextRefreshAfter: now.Add(-time.Second),
 		NextRetryAfter:   now.Add(-time.Second),
+		Metadata: map[string]any{
+			"access_token": "expired-access-token",
+			"expired":      now.Add(-time.Minute).Format(time.RFC3339),
+		},
 	}
 	registerDispatchTestAuth(t, manager, auth, "gpt-5")
 
@@ -496,6 +500,57 @@ func TestMarkRefreshPendingKeepsValidAccessTokenDispatchable(t *testing.T) {
 	decision, errDispatch := manager.Dispatch(context.Background(), []string{"codex"}, "gpt-5", Options{})
 	if errDispatch != nil || decision == nil {
 		t.Fatalf("Dispatch() = decision %#v error %v, want usable credential", decision, errDispatch)
+	}
+}
+
+func TestMarkRefreshPendingKeepsUnknownTokenDispatchableAfterModelCooldown(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, nil, nil)
+	now := time.Now().UTC()
+	retryAt := now.Add(-time.Second)
+	upstreamErr := &Error{Message: "upstream connection terminated", HTTPStatus: http.StatusServiceUnavailable, Retryable: true}
+	auth := &Auth{
+		ID:             "auth-refresh-unknown-token",
+		Index:          "auth-refresh-unknown-token",
+		Provider:       "codex",
+		Status:         StatusError,
+		StatusMessage:  upstreamErr.Message,
+		Unavailable:    true,
+		NextRetryAfter: retryAt,
+		LastError:      cloneError(upstreamErr),
+		ModelStates: map[string]*ModelState{
+			"gpt-5.6-luna": {
+				Status:         StatusError,
+				StatusMessage:  upstreamErr.Message,
+				Unavailable:    true,
+				NextRetryAfter: retryAt,
+				LastError:      cloneError(upstreamErr),
+			},
+		},
+	}
+	setAuthCooldownScope(auth, cooldownScopeModel)
+	registerDispatchTestAuth(t, manager, auth, "gpt-5.6-luna")
+
+	if !manager.markRefreshPending(auth.ID, now) {
+		t.Fatal("markRefreshPending() = false, want true")
+	}
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("pending auth not found")
+	}
+	if !updated.NextRefreshAfter.After(now) {
+		t.Fatalf("NextRefreshAfter = %v, want future refresh lease", updated.NextRefreshAfter)
+	}
+	if RefreshBackoffOpen(updated, now) {
+		t.Fatalf("unknown-token background refresh opened dispatch backoff: %#v", updated)
+	}
+	if blocked, reason, next := isAuthBlockedForModel(updated, "gpt-5.6-luna", now); blocked {
+		t.Fatalf("expired Luna cooldown blocked during background refresh: reason=%v next=%v auth=%#v", reason, next, updated)
+	}
+	decision, errDispatch := manager.Dispatch(context.Background(), []string{"codex"}, "gpt-5.6-luna", Options{})
+	if errDispatch != nil || decision == nil {
+		t.Fatalf("Dispatch() = decision %#v error %v, want usable lightweight credential", decision, errDispatch)
 	}
 }
 

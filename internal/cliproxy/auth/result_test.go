@@ -224,6 +224,46 @@ func TestTransientExecutionAggregateRetryDoesNotBlackoutModelWithoutCooldown(t *
 	}
 }
 
+func TestExpiredModelCooldownClearsStaleExecutionError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	retryAt := now.Add(-time.Second)
+	upstreamErr := &Error{Message: "upstream connection terminated", HTTPStatus: http.StatusServiceUnavailable, Retryable: true}
+	auth := &Auth{
+		ID:             "auth-expired-model-cooldown",
+		Provider:       "codex",
+		Status:         StatusError,
+		StatusMessage:  upstreamErr.Message,
+		Unavailable:    true,
+		NextRetryAfter: retryAt,
+		LastError:      cloneError(upstreamErr),
+		ModelStates: map[string]*ModelState{
+			"gpt-5.6-luna": {
+				Status:         StatusError,
+				StatusMessage:  upstreamErr.Message,
+				Unavailable:    true,
+				NextRetryAfter: retryAt,
+				LastError:      cloneError(upstreamErr),
+			},
+		},
+	}
+	setAuthCooldownScope(auth, cooldownScopeModel)
+
+	recomputeAggregatedAvailability(auth, now)
+
+	state := auth.ModelStates["gpt-5.6-luna"]
+	if state == nil || state.Status != StatusActive || state.Unavailable || state.LastError != nil || !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expired model cooldown state = %#v, want active and cleared", state)
+	}
+	if auth.Status != StatusActive || auth.Unavailable || auth.LastError != nil || !auth.NextRetryAfter.IsZero() {
+		t.Fatalf("expired aggregate cooldown state = %#v, want active and cleared", auth)
+	}
+	if hasModelError(auth, now) {
+		t.Fatal("expired model cooldown remained an active model error")
+	}
+}
+
 func TestAuthRefreshBackoffBlocksEveryModel(t *testing.T) {
 	now := time.Now().UTC()
 	auth := &Auth{
