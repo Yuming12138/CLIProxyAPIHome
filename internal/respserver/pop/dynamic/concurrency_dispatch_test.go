@@ -154,6 +154,35 @@ func TestConcurrencyDispatchFixture(t *testing.T) {
 	}
 }
 
+func TestBuildDispatchErrorJSONPreservesModelCooldownPayload(t *testing.T) {
+	raw := `{"error":{"code":"model_cooldown","message":"all credentials are cooling","model":"gpt-5.6-sol","reset_seconds":7}}`
+
+	got := buildDispatchErrorJSON(nil, errors.New(raw))
+	var gotJSON any
+	var wantJSON any
+	if errUnmarshal := json.Unmarshal([]byte(got), &gotJSON); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v; body=%s", errUnmarshal, got)
+	}
+	if errUnmarshal := json.Unmarshal([]byte(raw), &wantJSON); errUnmarshal != nil {
+		t.Fatalf("unmarshal fixture: %v", errUnmarshal)
+	}
+	if !reflect.DeepEqual(gotJSON, wantJSON) {
+		t.Fatalf("response = %s, want %s", got, raw)
+	}
+}
+
+func TestBuildDispatchErrorJSONWrapsUnrecognizedJSON(t *testing.T) {
+	raw := `{"error":{"code":"internal_error","message":"opaque"}}`
+
+	got := buildDispatchErrorJSON(nil, errors.New(raw))
+	if gjson.Get(got, "error.type").String() != "error" {
+		t.Fatalf("error.type = %q, want error; body=%s", gjson.Get(got, "error.type").String(), got)
+	}
+	if gjson.Get(got, "error.message").String() != raw {
+		t.Fatalf("error.message = %q, want original JSON string", gjson.Get(got, "error.message").String())
+	}
+}
+
 func TestHandleAuthSkipsSaturatedAffinityCandidate(t *testing.T) {
 	runtime, admitter := newConcurrencyDispatchRuntime(t, []string{"cred-a", "cred-b"})
 	admitter.SetResult("cred-a", concurrencyError("credential_concurrency_exceeded"))

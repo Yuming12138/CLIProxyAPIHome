@@ -438,7 +438,34 @@ func buildDispatchErrorJSON(runtime *home.Runtime, errDispatch error) string {
 		}
 		return out
 	}
+	if structured := structuredDispatchErrorJSON(errDispatch); structured != "" {
+		return structured
+	}
 	return buildErrorJSON(errDispatch.Error())
+}
+
+// structuredDispatchErrorJSON preserves the safe, provider-independent
+// model cooldown payload emitted by the core scheduler. Older versions of
+// buildErrorJSON wrapped that JSON inside error.message, which made downstream
+// CPA nodes lose the 429 status and report a misleading 502.
+func structuredDispatchErrorJSON(errDispatch error) string {
+	if errDispatch == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(errDispatch.Error())
+	if raw == "" || !gjson.Valid(raw) {
+		return ""
+	}
+	errorNode := gjson.Get(raw, "error")
+	if !errorNode.Exists() || !errorNode.IsObject() {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(errorNode.Get("code").String())) {
+	case "model_cooldown":
+		return raw
+	default:
+		return ""
+	}
 }
 
 func concurrencyErrorMessage(errorType string) string {
