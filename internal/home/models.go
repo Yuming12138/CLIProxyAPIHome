@@ -175,7 +175,10 @@ func (r *Runtime) registerModelsForAuth(a *coreauth.Auth) {
 	case "gemini":
 		models = registry.GetGeminiModels()
 		if len(configModels) > 0 {
-			models = configModels
+			// Account metadata can lag behind the Home registry. Keep its
+			// provider-specific models, but add built-in Codex image models so
+			// newly registered image capabilities remain schedulable.
+			models = append(configModels, registry.WithCodexBuiltins(nil)...)
 		} else if entry := r.resolveConfigGeminiKey(cfg, a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildGeminiConfigModels(entry)
