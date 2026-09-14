@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	coreauth "github.com/router-for-me/CLIProxyAPIHome/internal/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPIHome/internal/cluster"
 	"github.com/router-for-me/CLIProxyAPIHome/internal/config"
 	"github.com/router-for-me/CLIProxyAPIHome/internal/home"
@@ -85,6 +86,26 @@ func TestApplyConfigEventSynchronizesRESPInFlightLimitsWhenRuntimeConfigMatches(
 			}
 			if !reflect.DeepEqual(runtime.Config(), &nextConfig) {
 				t.Fatal("Runtime config changed despite matching the event config")
+			}
+		})
+	}
+}
+
+func TestQuotaAuthAccessTokenReadsCodexTokenShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		meta map[string]any
+		want string
+	}{
+		{name: "top level", meta: map[string]any{"access_token": "top-token"}, want: "top-token"},
+		{name: "nested", meta: map[string]any{"token": map[string]any{"accessToken": "nested-token"}}, want: "nested-token"},
+		{name: "missing", meta: map[string]any{"token": map[string]any{"kind": "codex"}}, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := quotaAuthAccessToken(&coreauth.Auth{Metadata: test.meta})
+			if got != test.want {
+				t.Fatalf("quotaAuthAccessToken() = %q, want %q", got, test.want)
 			}
 		})
 	}
