@@ -60,6 +60,35 @@ func TestCodexQuotaUTLSTransportKeepsHTTPFallback(t *testing.T) {
 	}
 }
 
+func TestCodexQuotaUTLSTransportFallsBackAfterDialFailure(t *testing.T) {
+	called := false
+	transport := &codexQuotaUTLSRoundTripper{
+		dialer: failingQuotaDialer{},
+		fallback: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			called = true
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok")), Request: request}, nil
+		}),
+	}
+	req, errRequest := http.NewRequest(http.MethodGet, "https://chatgpt.com/backend-api/wham/usage", nil)
+	if errRequest != nil {
+		t.Fatalf("NewRequest() error = %v", errRequest)
+	}
+	resp, errRoundTrip := transport.RoundTrip(req)
+	if errRoundTrip != nil {
+		t.Fatalf("RoundTrip() error = %v", errRoundTrip)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if !called || resp.StatusCode != http.StatusOK {
+		t.Fatalf("fallback called = %v, status = %d", called, resp.StatusCode)
+	}
+}
+
+type failingQuotaDialer struct{}
+
+func (failingQuotaDialer) Dial(_, _ string) (net.Conn, error) {
+	return nil, errors.New("dial failed")
+}
+
 func TestDialCodexQuotaContextStopsAtDeadline(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)

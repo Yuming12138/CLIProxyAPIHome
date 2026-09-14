@@ -61,7 +61,7 @@ func (t *codexQuotaUTLSRoundTripper) RoundTrip(req *http.Request) (*http.Respons
 	}
 	conn, errDial := dialCodexQuotaContext(req.Context(), t.dialer, "tcp", net.JoinHostPort(hostname, port))
 	if errDial != nil {
-		return nil, errDial
+		return t.fallbackRoundTrip(req, errDial)
 	}
 	if deadline, ok := req.Context().Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
@@ -70,23 +70,23 @@ func (t *codexQuotaUTLSRoundTripper) RoundTrip(req *http.Request) (*http.Respons
 	tlsConn := tls.UClient(conn, &tls.Config{ServerName: hostname}, tls.HelloChrome_Auto)
 	if errHandshake := tlsConn.HandshakeContext(req.Context()); errHandshake != nil {
 		_ = conn.Close()
-		return nil, errHandshake
+		return t.fallbackRoundTrip(req, errHandshake)
 	}
 	if negotiated := tlsConn.ConnectionState().NegotiatedProtocol; negotiated != http2.NextProtoTLS {
 		_ = tlsConn.Close()
-		return nil, fmt.Errorf("codex quota transport: upstream negotiated %q instead of HTTP/2", negotiated)
+		return t.fallbackRoundTrip(req, fmt.Errorf("codex quota transport: upstream negotiated %q instead of HTTP/2", negotiated))
 	}
 
 	h2Transport := &http2.Transport{}
 	h2Conn, errH2 := h2Transport.NewClientConn(tlsConn)
 	if errH2 != nil {
 		_ = tlsConn.Close()
-		return nil, errH2
+		return t.fallbackRoundTrip(req, errH2)
 	}
 	resp, errRoundTrip := h2Conn.RoundTrip(req)
 	if errRoundTrip != nil {
 		_ = h2Conn.Close()
-		return nil, errRoundTrip
+		return t.fallbackRoundTrip(req, errRoundTrip)
 	}
 	if resp.Body == nil {
 		_ = h2Conn.Close()
@@ -94,6 +94,23 @@ func (t *codexQuotaUTLSRoundTripper) RoundTrip(req *http.Request) (*http.Respons
 	}
 	resp.Body = &closeCodexQuotaConnBody{ReadCloser: resp.Body, closeConn: h2Conn.Close}
 	return resp, nil
+}
+
+func (t *codexQuotaUTLSRoundTripper) fallbackRoundTrip(req *http.Request, primaryErr error) (*http.Response, error) {
+	if t == nil || t.fallback == nil {
+		return nil, primaryErr
+	}
+	if req != nil && req.Body != nil && req.GetBody != nil {
+		body, errGetBody := req.GetBody()
+		if errGetBody == nil {
+			req.Body = body
+		}
+	}
+	resp, errFallback := t.fallback.RoundTrip(req)
+	if errFallback == nil {
+		return resp, nil
+	}
+	return nil, fmt.Errorf("codex quota transport: utls=%v; fallback=%w", primaryErr, errFallback)
 }
 
 type codexQuotaDialResult struct {
