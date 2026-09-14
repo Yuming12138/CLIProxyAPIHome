@@ -301,6 +301,66 @@ func (r *Repository) UpsertQuotaSnapshot(ctx context.Context, input QuotaSnapsho
 	return upsertQuotaSnapshotDB(ctx, db, input)
 }
 
+// UpdateQuotaResetCredits persists a reset-credit observation without touching
+// the rolling-window observation time, expiry, status, or rows. This is used
+// when the independent reset endpoint is reachable while usage is unavailable.
+func (r *Repository) UpdateQuotaResetCredits(ctx context.Context, credentialID string, value *QuotaResetCredits, collectionError *QuotaCollectionError, expectedProbeOwner string, observedAt time.Time) (bool, error) {
+	credentialID = strings.TrimSpace(credentialID)
+	if credentialID == "" || value == nil {
+		return false, fmt.Errorf("quota reset-credit update requires credential and value")
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	} else {
+		observedAt = observedAt.UTC()
+	}
+	if errNormalize := normalizeQuotaResetCredits(value); errNormalize != nil {
+		return false, errNormalize
+	}
+	raw, errEncode := quotaResetCreditsJSON(value)
+	if errEncode != nil {
+		return false, errEncode
+	}
+	db, errDB := r.database()
+	if errDB != nil {
+		return false, errDB
+	}
+	updated := false
+	errTx := db.WithContext(contextOrBackground(ctx)).Transaction(func(tx *gorm.DB) error {
+		var record QuotaSnapshotRecord
+		if errFind := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&record, "credential_id = ?", credentialID).Error; errFind != nil {
+			return errFind
+		}
+		if expectedProbeOwner = strings.TrimSpace(expectedProbeOwner); expectedProbeOwner != "" && record.ProbeLeaseOwner != expectedProbeOwner {
+			return nil
+		}
+		updates := map[string]any{
+			"reset_credits": raw, "collection_status": "partial", "last_attempt_at": observedAt,
+			"probe_lease_owner": "", "probe_lease_expires_at": nil, "updated_at": time.Now().UTC(),
+			"error_code": "", "error_message": "", "error_retryable": false,
+			"error_occurred_at": nil, "error_status_code": 0, "error_request_id": "",
+		}
+		if collectionError != nil {
+			updates["error_code"] = strings.TrimSpace(collectionError.Code)
+			updates["error_message"] = quotaSafeErrorMessage(collectionError.Message)
+			updates["error_retryable"] = collectionError.Retryable
+			updates["error_occurred_at"] = quotaUTC(collectionError.OccurredAt)
+			if collectionError.UpstreamStatusCode != nil {
+				updates["error_status_code"] = *collectionError.UpstreamStatusCode
+			}
+			if collectionError.RequestID != nil {
+				updates["error_request_id"] = quotaBoundedRequestID(*collectionError.RequestID)
+			}
+		}
+		if errUpdate := tx.Model(&QuotaSnapshotRecord{}).Where("credential_id = ?", credentialID).Updates(updates).Error; errUpdate != nil {
+			return errUpdate
+		}
+		updated = true
+		return nil
+	})
+	return updated, errTx
+}
+
 func upsertQuotaSnapshotDB(ctx context.Context, db *gorm.DB, input QuotaSnapshotWrite) (bool, error) {
 	if errValidate := validateQuotaSnapshotWrite(&input); errValidate != nil {
 		return false, errValidate
