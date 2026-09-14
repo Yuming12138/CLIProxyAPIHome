@@ -61,6 +61,22 @@ func quotaAuthAccessToken(auth *coreauth.Auth) string {
 			return strings.TrimSpace(value)
 		}
 	}
+	for _, key := range []string{"token", "Token"} {
+		switch token := auth.Metadata[key].(type) {
+		case map[string]any:
+			for _, nestedKey := range []string{"access_token", "accessToken"} {
+				if value, ok := token[nestedKey].(string); ok && strings.TrimSpace(value) != "" {
+					return strings.TrimSpace(value)
+				}
+			}
+		case map[string]string:
+			for _, nestedKey := range []string{"access_token", "accessToken"} {
+				if value := strings.TrimSpace(token[nestedKey]); value != "" {
+					return value
+				}
+			}
+		}
+	}
 	return ""
 }
 
