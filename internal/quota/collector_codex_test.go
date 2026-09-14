@@ -26,6 +26,9 @@ func TestCollectorPersistsCodexPlanWindowsAndResetCredits(t *testing.T) {
 		if request.Header.Get("OpenAI-Beta") != "codex-1" {
 			t.Errorf("OpenAI-Beta = %q, want codex-1", request.Header.Get("OpenAI-Beta"))
 		}
+		if request.Header.Get("originator") != "Codex Desktop" {
+			t.Errorf("originator = %q, want Codex Desktop", request.Header.Get("originator"))
+		}
 		switch request.URL.Path {
 		case "/usage":
 			usageRequests.Add(1)

@@ -433,6 +433,7 @@ func (c *Collector) probeCodex(ctx context.Context, auth *coreauth.Auth) (probeR
 	headers := http.Header{
 		"Content-Type": []string{"application/json"},
 		"OpenAI-Beta":  []string{"codex-1"},
+		"originator":   []string{"Codex Desktop"},
 		"User-Agent":   []string{codexUserAgent},
 	}
 	if accountID := quotaMetadataString(auth.Metadata, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"); accountID != "" {
@@ -528,6 +529,15 @@ func (c *Collector) probeRequest(ctx context.Context, auth *coreauth.Auth, metho
 	}
 	resp, errDo := client.Do(req)
 	if errDo != nil {
+		// Keep transport failures diagnosable without exposing the credential or
+		// proxy configuration. In particular, usage and reset-credit probes use
+		// the same upstream host but can fail at different protocol stages.
+		log.WithFields(log.Fields{
+			"credential_id": auth.ID,
+			"method":        method,
+			"path":          req.URL.Path,
+			"error_type":    fmt.Sprintf("%T", errDo),
+		}).WithError(errDo).Debug("quota collector: upstream transport failed")
 		return nil, nil, &probeError{code: "UPSTREAM_UNAVAILABLE", message: "Upstream quota endpoint is unavailable.", retryable: true}
 	}
 	defer func() {
@@ -696,7 +706,11 @@ func quotaProbeEligible(auth *coreauth.Auth, now time.Time) bool {
 // Refresh failures remain protected by their retry deadline.
 func quotaCooldownAllowsProbe(auth *coreauth.Auth, now time.Time) bool {
 	if auth == nil || coreauth.RefreshBackoffOpen(auth, now) {
-		return false
+		// Keep quota observation alive during a transient OAuth refresh outage
+		// when the current access token is still available. The upstream probe
+		// decides whether that token remains valid; this does not relax dispatch
+		// or billing guards.
+		return auth != nil && coreauth.RefreshBackoffOpen(auth, now) && quotaAccessToken(auth) != ""
 	}
 	return auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now)
 }

@@ -52,6 +52,18 @@ func main() {
 	os.Exit(run())
 }
 
+func quotaAuthAccessToken(auth *coreauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	for _, key := range []string{"access_token", "accessToken"} {
+		if value, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 type inFlightConfigApplier interface {
 	ApplyInFlightConfig(config.CredentialInFlightConfig) error
 }
@@ -419,6 +431,19 @@ func run() int {
 		manager := rt.CoreManager()
 		if forceRefresh || (manager != nil && manager.ShouldRefreshCredential(current, time.Now().UTC())) {
 			if _, errRefresh := rt.RefreshNow(ctx, current.ID); errRefresh != nil {
+				// A transient OAuth refresh outage must not prevent quota probes from
+				// using an access token that is still accepted by the WHAM endpoints.
+				// The probe itself remains authoritative: a real 401/403 will be
+				// recorded as a failed quota collection and will not update credits.
+				fallbackAllowed := errors.Is(errRefresh, coreauth.ErrRefreshUnsupported)
+				var authErr *coreauth.Error
+				if errors.As(errRefresh, &authErr) && authErr != nil {
+					fallbackAllowed = authErr.Retryable
+				}
+				if fallbackAllowed && quotaAuthAccessToken(current) != "" {
+					log.WithFields(log.Fields{"credential_id": current.ID, "provider": current.Provider}).Debug("quota auth refresh unavailable; probing with current access token")
+					return current, nil
+				}
 				return nil, errRefresh
 			}
 			current, _, errAuth = repo.GetAuth(ctx, candidate.ID)
