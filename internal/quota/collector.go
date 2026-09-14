@@ -428,7 +428,13 @@ func (c *Collector) probeCredential(ctx context.Context, auth *coreauth.Auth) (p
 }
 
 func (c *Collector) probeCodex(ctx context.Context, auth *coreauth.Auth) (probeResult, *probeError) {
-	headers := http.Header{"Content-Type": []string{"application/json"}, "User-Agent": []string{codexUserAgent}}
+	// Codex WHAM endpoints require the beta contract header used by the
+	// official Codex client. Keep it on both usage and reset-credit requests.
+	headers := http.Header{
+		"Content-Type": []string{"application/json"},
+		"OpenAI-Beta":  []string{"codex-1"},
+		"User-Agent":   []string{codexUserAgent},
+	}
 	if accountID := quotaMetadataString(auth.Metadata, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"); accountID != "" {
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}

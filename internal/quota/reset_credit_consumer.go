@@ -137,6 +137,7 @@ func (c *Collector) postCodexResetCredit(ctx context.Context, auth *coreauth.Aut
 	headers := http.Header{
 		"Accept":       []string{"application/json"},
 		"Content-Type": []string{"application/json"},
+		"OpenAI-Beta":  []string{"codex-1"},
 		"User-Agent":   []string{codexUserAgent},
 	}
 	if accountID := quotaMetadataString(auth.Metadata, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"); accountID != "" {

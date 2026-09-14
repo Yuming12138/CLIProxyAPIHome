@@ -23,6 +23,9 @@ func TestCollectorPersistsCodexPlanWindowsAndResetCredits(t *testing.T) {
 		if request.Header.Get("Authorization") != "Bearer probe-secret" || request.Header.Get("Chatgpt-Account-Id") != "acct-123" {
 			t.Errorf("unexpected Codex headers: %#v", request.Header)
 		}
+		if request.Header.Get("OpenAI-Beta") != "codex-1" {
+			t.Errorf("OpenAI-Beta = %q, want codex-1", request.Header.Get("OpenAI-Beta"))
+		}
 		switch request.URL.Path {
 		case "/usage":
 			usageRequests.Add(1)
