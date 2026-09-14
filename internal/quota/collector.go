@@ -537,7 +537,7 @@ func (c *Collector) probeRequest(ctx context.Context, auth *coreauth.Auth, metho
 			"method":        method,
 			"path":          req.URL.Path,
 			"error_type":    fmt.Sprintf("%T", errDo),
-		}).WithError(errDo).Debug("quota collector: upstream transport failed")
+		}).WithError(errDo).Warn("quota collector: upstream transport failed")
 		return nil, nil, &probeError{code: "UPSTREAM_UNAVAILABLE", message: "Upstream quota endpoint is unavailable.", retryable: true}
 	}
 	defer func() {
