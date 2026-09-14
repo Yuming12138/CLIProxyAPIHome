@@ -358,13 +358,25 @@ func (c *Collector) collectCredential(ctx context.Context, auth *coreauth.Auth, 
 		result.resetCredits.ExpiresAt = &resetCreditsExpiresAt
 	}
 	status := quotaWindowAggregateStatus(result.windows)
+	source := "active_probe"
+	// A reset-credit-only success must not erase the last usable rolling-window
+	// snapshot when /wham/usage is temporarily unavailable. Preserve the
+	// existing aggregate status while writing the fresh reset observation.
+	if !result.replaceWindows && len(result.windows) == 0 {
+		if existing, errExisting := c.repo.GetQuotaCredential(ctx, auth.ID, observedAt); errExisting == nil && existing != nil {
+			status = existing.QuotaStatus
+			if existing.Source != nil && strings.TrimSpace(*existing.Source) != "" {
+				source = strings.TrimSpace(*existing.Source)
+			}
+		}
+	}
 	collectionStatus := "success"
 	if result.partial {
 		collectionStatus = "partial"
 	}
 	snapshotVersion := cluster.QuotaSnapshotVersion(auth.Provider)
 	input := cluster.QuotaSnapshotWrite{
-		CredentialID: auth.ID, QuotaStatus: status, CollectionStatus: collectionStatus, Source: "active_probe",
+		CredentialID: auth.ID, QuotaStatus: status, CollectionStatus: collectionStatus, Source: source,
 		ObservedAt: &observedAt, MaxAcceptedObservedAt: &observedAt, ExpiresAt: &expiresAt, LastAttemptAt: &observedAt, LastSuccessAt: &observedAt,
 		NextProbeAt: &expiresAt, ConsecutiveFailure: 0, Error: result.collectionError, Plan: result.plan, ReplacePlan: true, ParserVersion: snapshotVersion, CollectorVersion: snapshotVersion,
 		ResetCredits: result.resetCredits, ReplaceResetCredits: result.replaceResetCredits,
@@ -439,46 +451,72 @@ func (c *Collector) probeCodex(ctx context.Context, auth *coreauth.Auth) (probeR
 	if accountID := quotaMetadataString(auth.Metadata, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"); accountID != "" {
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}
-	body, _, errRequest := c.probeRequest(ctx, auth, http.MethodGet, c.options.CodexUsageURL, nil, headers)
-	if errRequest != nil {
-		return probeResult{}, errRequest
+	// The two WHAM endpoints are independent. Query them concurrently and
+	// settle each result separately, matching the official checker behavior.
+	// A transient usage failure must not prevent reset-credit detection.
+	type codexProbeResponse struct {
+		body []byte
+		err  *probeError
 	}
-	observedAt := c.options.Now().UTC()
-	usage, errParse := parseCodexUsage(body, observedAt)
-	if errParse != nil || len(usage.windows) == 0 {
-		return probeResult{}, &probeError{code: "UPSTREAM_RESPONSE_INVALID", message: "Upstream quota response did not contain usable windows.", retryable: true}
-	}
-	if usage.plan == nil {
-		usage.plan = codexPlanFromAuth(auth)
-	}
-	result := probeResult{
-		windows:             usage.windows,
-		plan:                usage.plan,
-		resetCredits:        codexResetCreditsCountFallback(usage.resetCreditsAvailableCount, observedAt),
-		replaceWindows:      true,
-		replaceResetCredits: true,
-	}
+	usageCh := make(chan codexProbeResponse, 1)
+	resetCh := make(chan codexProbeResponse, 1)
+	go func() {
+		body, _, errRequest := c.probeRequest(ctx, auth, http.MethodGet, c.options.CodexUsageURL, nil, headers)
+		usageCh <- codexProbeResponse{body: body, err: errRequest}
+	}()
 	resetHeaders := headers.Clone()
 	resetHeaders.Set("Accept", "application/json")
-	resetBody, _, errResetRequest := c.probeRequest(ctx, auth, http.MethodGet, c.options.CodexResetCreditsURL, nil, resetHeaders)
-	if errResetRequest != nil {
-		if codexResetCreditDetailsRequired(usage.resetCreditsAvailableCount) {
-			result.partial = true
-			result.collectionError = probeCollectionError(errResetRequest, observedAt)
+	go func() {
+		body, _, errRequest := c.probeRequest(ctx, auth, http.MethodGet, c.options.CodexResetCreditsURL, nil, resetHeaders)
+		resetCh <- codexProbeResponse{body: body, err: errRequest}
+	}()
+
+	observedAt := c.options.Now().UTC()
+	usageResponse := <-usageCh
+	resetResponse := <-resetCh
+	result := probeResult{replaceResetCredits: true}
+	var usage codexUsageResult
+	var usageError *probeError
+	if usageResponse.err != nil {
+		usageError = usageResponse.err
+	} else {
+		parsedUsage, errParse := parseCodexUsage(usageResponse.body, observedAt)
+		if errParse != nil || len(parsedUsage.windows) == 0 {
+			usageError = &probeError{code: "UPSTREAM_RESPONSE_INVALID", message: "Upstream quota response did not contain usable windows.", retryable: true}
+		} else {
+			usage = parsedUsage
+			if usage.plan == nil {
+				usage.plan = codexPlanFromAuth(auth)
+			}
+			result.windows = usage.windows
+			result.plan = usage.plan
+			result.resetCredits = codexResetCreditsCountFallback(usage.resetCreditsAvailableCount, observedAt)
+			result.replaceWindows = true
 		}
-		return result, nil
 	}
-	resetCredits, errResetParse := parseCodexResetCredits(resetBody, observedAt, usage.resetCreditsAvailableCount)
-	if errResetParse != nil {
-		if codexResetCreditDetailsRequired(usage.resetCreditsAvailableCount) {
-			resetError := &probeError{code: "RESET_CREDITS_RESPONSE_INVALID", message: "Codex reset credits response could not be parsed.", retryable: true}
-			result.partial = true
-			result.collectionError = probeCollectionError(resetError, observedAt)
+	if usageError != nil {
+		result.partial = true
+		result.collectionError = probeCollectionError(usageError, observedAt)
+	}
+
+	var resetError *probeError
+	if resetResponse.err != nil {
+		resetError = resetResponse.err
+	} else {
+		resetCredits, errResetParse := parseCodexResetCredits(resetResponse.body, observedAt, usage.resetCreditsAvailableCount)
+		if errResetParse != nil {
+			resetError = &probeError{code: "RESET_CREDITS_RESPONSE_INVALID", message: "Codex reset credits response could not be parsed.", retryable: true}
+		} else {
+			result.resetCredits = resetCredits
 		}
-		return result, nil
 	}
-	result.resetCredits = resetCredits
-	result.replaceResetCredits = true
+	if resetError != nil && usageError == nil && codexResetCreditDetailsRequired(usage.resetCreditsAvailableCount) {
+		result.partial = true
+		result.collectionError = probeCollectionError(resetError, observedAt)
+	}
+	if usageError != nil && resetError != nil {
+		return probeResult{}, usageError
+	}
 	return result, nil
 }
 
