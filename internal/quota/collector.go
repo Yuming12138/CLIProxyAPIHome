@@ -357,6 +357,13 @@ func (c *Collector) collectCredential(ctx context.Context, auth *coreauth.Auth, 
 		resetCreditsExpiresAt := expiresAt
 		result.resetCredits.ExpiresAt = &resetCreditsExpiresAt
 	}
+	if result.resetCreditsOnly {
+		if _, errReset := c.repo.UpdateQuotaResetCredits(ctx, auth.ID, result.resetCredits, result.collectionError, c.options.Owner, observedAt); errReset != nil {
+			log.WithError(errReset).WithField("credential_id", auth.ID).Warn("quota collector: reset-credit-only snapshot update failed")
+			c.failProbe(ctx, auth.ID, &probeError{code: "SNAPSHOT_PERSIST_FAILED", message: "Quota reset-credit snapshot could not be persisted.", retryable: true})
+		}
+		return
+	}
 	status := quotaWindowAggregateStatus(result.windows)
 	source := "active_probe"
 	// A reset-credit-only success must not erase the last usable rolling-window
@@ -416,6 +423,7 @@ type probeResult struct {
 	partial             bool
 	replaceWindows      bool
 	replaceResetCredits bool
+	resetCreditsOnly    bool
 	collectionError     *cluster.QuotaCollectionError
 }
 
@@ -497,6 +505,13 @@ func (c *Collector) probeCodex(ctx context.Context, auth *coreauth.Auth) (probeR
 	if usageError != nil {
 		result.partial = true
 		result.collectionError = probeCollectionError(usageError, observedAt)
+		// Keep plan metadata stable when only the reset-credit request succeeded.
+		if existing, errExisting := c.repo.GetQuotaCredential(ctx, auth.ID, observedAt); errExisting == nil && existing != nil && existing.Plan != nil {
+			result.plan = existing.Plan
+		}
+		// Re-submit the last known windows so the snapshot writer can preserve
+		// them while refreshing reset credits, even when their old expiry has
+		// already elapsed.
 	}
 
 	var resetError *probeError
@@ -513,6 +528,9 @@ func (c *Collector) probeCodex(ctx context.Context, auth *coreauth.Auth) (probeR
 	if resetError != nil && usageError == nil && codexResetCreditDetailsRequired(usage.resetCreditsAvailableCount) {
 		result.partial = true
 		result.collectionError = probeCollectionError(resetError, observedAt)
+	}
+	if usageError != nil && resetError == nil && result.resetCredits != nil {
+		result.resetCreditsOnly = true
 	}
 	if usageError != nil && resetError != nil {
 		return probeResult{}, usageError

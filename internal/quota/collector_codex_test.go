@@ -113,6 +113,20 @@ func TestCollectorCodexResetCreditsSurviveUsageProbeFailure(t *testing.T) {
 	repo := newCollectorTestRepository(t)
 	now := time.Date(2026, 7, 22, 1, 30, 0, 0, time.UTC)
 	seedCollectorAuth(t, repo, "codex-reset-independent", map[string]any{"type": "codex", "access_token": "probe-secret", "account_id": "acct-123"})
+	oldObservedAt := now.Add(-time.Hour)
+	oldExpiresAt := now.Add(-time.Minute)
+	remaining := 0.75
+	period := float64(1)
+	if _, errSeed := repo.UpsertQuotaSnapshot(context.Background(), cluster.QuotaSnapshotWrite{
+		CredentialID: "codex-reset-independent", QuotaStatus: "healthy", CollectionStatus: "success", Source: "active_probe",
+		ObservedAt: &oldObservedAt, ExpiresAt: &oldExpiresAt, LastSuccessAt: &oldObservedAt, NextProbeAt: &oldExpiresAt,
+		ReplaceWindows: true, Windows: []cluster.QuotaWindow{{
+			ID: "codex-1-week", Scope: "account", Mode: "rolling", Status: "healthy", Unit: "percentage",
+			RemainingRatio: &remaining, PeriodUnit: "week", PeriodValue: &period, Source: "active_probe", ObservedAt: oldObservedAt,
+		}},
+	}); errSeed != nil {
+		t.Fatalf("seed quota snapshot: %v", errSeed)
+	}
 	var usageRequests atomic.Int32
 	var resetRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -154,8 +168,8 @@ func TestCollectorCodexResetCreditsSurviveUsageProbeFailure(t *testing.T) {
 	if item.CollectionStatus != "partial" || item.Error == nil || item.Error.Code != "UPSTREAM_UNAVAILABLE" {
 		t.Fatalf("usage failure was not recorded as partial: %+v", item)
 	}
-	if len(item.Windows) != 0 {
-		t.Fatalf("unexpected windows from failed usage probe: %+v", item.Windows)
+	if len(item.Windows) != 1 || item.Windows[0].ID != "codex-1-week" || item.Windows[0].RemainingRatio == nil || *item.Windows[0].RemainingRatio != remaining {
+		t.Fatalf("last known windows were not preserved: %+v", item.Windows)
 	}
 	if item.ResetCredits == nil || item.ResetCredits.AvailableCount == nil || *item.ResetCredits.AvailableCount != 2 || len(item.ResetCredits.Credits) != 2 || !item.ResetCredits.ObservedAt.Equal(now) {
 		t.Fatalf("reset credits were not persisted independently: %+v", item.ResetCredits)
